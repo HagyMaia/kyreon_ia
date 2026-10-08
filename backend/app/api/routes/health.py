@@ -16,11 +16,14 @@ async def health(db: AsyncSession = Depends(get_db)):
     except Exception as e:
         db_status = f"unhealthy: {str(e)}"
 
+    db_type = "postgresql" if "postgres" in settings.DATABASE_URL.lower() else "sqlite"
+
     return {
         "status": "ok",
         "app": settings.APP_NAME,
         "environment": settings.ENVIRONMENT,
         "database": db_status,
+        "database_type": db_type,
         "active_provider": settings.active_provider,
         "openai_configured": bool(settings.OPENAI_API_KEY),
         "gemini_configured": bool(settings.GEMINI_API_KEY),

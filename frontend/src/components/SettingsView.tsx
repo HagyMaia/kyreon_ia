@@ -148,7 +148,10 @@ export function SettingsView({ health, models, onRefreshHealth }: SettingsViewPr
             <div className="status-row">
               <span>Banco de Dados:</span>
               <span className={health?.database === "healthy" ? "badge-ok" : "badge-warn"}>
-                <CheckCircle2 size={14} /> {health?.database ? `${health.database} (SQLite)` : "Local (Offline)"}
+                <CheckCircle2 size={14} />{" "}
+                {health?.database
+                  ? `${health.database} (${health.database_type === "postgresql" ? "PostgreSQL / Neon" : "SQLite"})`
+                  : "Local (Offline)"}
               </span>
             </div>
             <div className="status-row">

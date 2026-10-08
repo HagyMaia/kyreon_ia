@@ -274,6 +274,138 @@ export interface SpeechRecognitionController {
   abort: () => void;
 }
 
+/**
+ * Normaliza e deduplica os resultados do Web Speech API.
+ * Corrige o bug crônico do Google Speech Services no Android Chrome / dispositivos móveis,
+ * onde cada novo resultado 'isFinal' repete e acumula todas as palavras anteriores da sessão,
+ * gerando frases duplicadas como: "Me Me Me fale Me fale um Me fale um pouco...".
+ */
+export function deduplicateSpeechResults(
+  results: Array<{ transcript: string; isFinal: boolean }>
+): {
+  transcript: string;
+  isFinal: boolean;
+} {
+  const finalSegments: string[] = [];
+  let interimText = "";
+  let hasAnyFinal = false;
+
+  for (let i = 0; i < results.length; i++) {
+    const res = results[i];
+    const raw = (res.transcript || "").trim();
+    if (!raw) continue;
+
+    if (res.isFinal) {
+      hasAnyFinal = true;
+      if (finalSegments.length === 0) {
+        finalSegments.push(raw);
+        continue;
+      }
+
+      const curr = raw;
+      const currLower = curr.toLowerCase();
+      const prev = finalSegments[finalSegments.length - 1];
+      const prevLower = prev.toLowerCase();
+
+      // 1. Idêntico ao segmento anterior
+      if (currLower === prevLower) {
+        continue;
+      }
+
+      // 2. O resultado atual é um superset acumulativo de toda a frase acumulada até agora
+      // Ex: acumulado="Me fale", curr="Me fale um pouco sobre você" -> substitui tudo por curr
+      const fullAccumulatedLower = finalSegments.join(" ").toLowerCase();
+      if (currLower.startsWith(fullAccumulatedLower)) {
+        finalSegments.length = 0;
+        finalSegments.push(curr);
+        continue;
+      }
+
+      // 3. O resultado atual é um superset do último segmento
+      // Ex: prev="Me", curr="Me fale" -> substitui o último
+      if (currLower.startsWith(prevLower)) {
+        finalSegments[finalSegments.length - 1] = curr;
+        continue;
+      }
+
+      // 4. O último segmento já contém o resultado atual
+      if (prevLower.startsWith(currLower) || fullAccumulatedLower.endsWith(currLower)) {
+        continue;
+      }
+
+      // 5. Sobreposição de palavras (sliding window / word overlap)
+      // Ex: prev="fale um pouco", curr="um pouco sobre você" -> "fale um pouco sobre você"
+      const prevWords = prev.split(/\s+/);
+      const currWords = curr.split(/\s+/);
+      const maxOverlap = Math.min(prevWords.length, currWords.length);
+      let overlapped = false;
+
+      for (let len = maxOverlap; len > 0; len--) {
+        const slicePrev = prevWords.slice(prevWords.length - len).join(" ").toLowerCase();
+        const sliceCurr = currWords.slice(0, len).join(" ").toLowerCase();
+        if (slicePrev === sliceCurr) {
+          const remainder = currWords.slice(len).join(" ");
+          if (remainder) {
+            finalSegments[finalSegments.length - 1] = `${prev} ${remainder}`;
+          }
+          overlapped = true;
+          break;
+        }
+      }
+
+      if (!overlapped) {
+        finalSegments.push(curr);
+      }
+    } else {
+      interimText = raw;
+    }
+  }
+
+  let finalText = finalSegments.join(" ").trim();
+  let full = finalText;
+
+  if (interimText) {
+    const finalLower = finalText.toLowerCase();
+    const interimLower = interimText.toLowerCase();
+
+    if (!finalText) {
+      full = interimText;
+    } else if (interimLower.startsWith(finalLower)) {
+      // Interim é uma extensão contínua do finalText
+      full = interimText;
+    } else if (finalLower.endsWith(interimLower) || finalLower.includes(interimLower)) {
+      // Já está contido no final
+      full = finalText;
+    } else {
+      // Sobreposição de palavras entre final e interim
+      const finalWords = finalText.split(/\s+/);
+      const interimWords = interimText.split(/\s+/);
+      const maxOverlap = Math.min(finalWords.length, interimWords.length);
+      let overlapped = false;
+
+      for (let len = maxOverlap; len > 0; len--) {
+        const sliceFinal = finalWords.slice(finalWords.length - len).join(" ").toLowerCase();
+        const sliceInterim = interimWords.slice(0, len).join(" ").toLowerCase();
+        if (sliceFinal === sliceInterim) {
+          const remainder = interimWords.slice(len).join(" ");
+          full = remainder ? `${finalText} ${remainder}` : finalText;
+          overlapped = true;
+          break;
+        }
+      }
+
+      if (!overlapped) {
+        full = `${finalText} ${interimText}`.trim();
+      }
+    }
+  }
+
+  return {
+    transcript: full,
+    isFinal: hasAnyFinal && !interimText,
+  };
+}
+
 export function createSpeechRecognition(options: {
   onTranscript: (transcript: string, isFinal: boolean) => void;
   onError: (error: string) => void;
@@ -293,6 +425,8 @@ export function createSpeechRecognition(options: {
   let recognition: any;
   let isExplicitlyStopped = false;
   let restartTimeout: any = null;
+  let accumulatedSessionText = "";
+  let lastSessionTranscript = "";
 
   try {
     recognition = new SpeechRecognitionClass();
@@ -313,23 +447,31 @@ export function createSpeechRecognition(options: {
   }
 
   recognition.onresult = (event: any) => {
-    let interimTranscript = "";
-    let finalTranscript = "";
-    let hasFinal = false;
+    const rawList: Array<{ transcript: string; isFinal: boolean }> = [];
+
+    // Se temos texto acumulado de uma sessão anterior reiniciada automaticamente
+    if (accumulatedSessionText) {
+      rawList.push({
+        transcript: accumulatedSessionText,
+        isFinal: true,
+      });
+    }
 
     for (let i = 0; i < event.results.length; ++i) {
-      const result = event.results[i];
-      if (result.isFinal) {
-        finalTranscript += result[0].transcript + " ";
-        hasFinal = true;
-      } else {
-        interimTranscript += result[0].transcript;
+      const res = event.results[i];
+      if (res && res[0] && typeof res[0].transcript === "string") {
+        rawList.push({
+          transcript: res[0].transcript,
+          isFinal: Boolean(res.isFinal),
+        });
       }
     }
 
-    const fullTranscript = (finalTranscript + interimTranscript).trim();
-    if (fullTranscript) {
-      options.onTranscript(fullTranscript, hasFinal && interimTranscript.trim() === "");
+    const { transcript, isFinal } = deduplicateSpeechResults(rawList);
+    lastSessionTranscript = transcript;
+
+    if (transcript) {
+      options.onTranscript(transcript, isFinal);
     }
   };
 
@@ -368,6 +510,11 @@ export function createSpeechRecognition(options: {
 
   recognition.onend = () => {
     if (!isExplicitlyStopped) {
+      // Salva o que já foi reconhecido para a próxima sessão não perder conteúdo
+      if (lastSessionTranscript) {
+        accumulatedSessionText = lastSessionTranscript;
+      }
+
       if (restartTimeout) clearTimeout(restartTimeout);
       restartTimeout = setTimeout(() => {
         if (!isExplicitlyStopped) {
@@ -379,6 +526,8 @@ export function createSpeechRecognition(options: {
         }
       }, 150);
     } else {
+      accumulatedSessionText = "";
+      lastSessionTranscript = "";
       options.onEnd();
     }
   };
@@ -386,6 +535,8 @@ export function createSpeechRecognition(options: {
   return {
     start: () => {
       isExplicitlyStopped = false;
+      accumulatedSessionText = "";
+      lastSessionTranscript = "";
       if (restartTimeout) clearTimeout(restartTimeout);
       try {
         recognition.start();
@@ -395,6 +546,8 @@ export function createSpeechRecognition(options: {
     },
     stop: () => {
       isExplicitlyStopped = true;
+      accumulatedSessionText = "";
+      lastSessionTranscript = "";
       if (restartTimeout) clearTimeout(restartTimeout);
       try {
         recognition.stop();
@@ -402,6 +555,8 @@ export function createSpeechRecognition(options: {
     },
     abort: () => {
       isExplicitlyStopped = true;
+      accumulatedSessionText = "";
+      lastSessionTranscript = "";
       if (restartTimeout) clearTimeout(restartTimeout);
       try {
         recognition.abort();

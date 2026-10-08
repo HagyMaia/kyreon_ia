@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: kyreon-ia-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        value: "https://kyreonia.vercel.app,http://localhost:5173"

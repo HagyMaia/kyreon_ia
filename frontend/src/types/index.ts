@@ -79,6 +79,7 @@ export interface SystemHealth {
   status: string;
   app: string;
   database: string;
+  database_type?: string;
   active_provider: string;
   openai_configured: boolean;
   gemini_configured: boolean;
