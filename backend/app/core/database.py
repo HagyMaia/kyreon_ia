@@ -8,12 +8,24 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
 
-# Engine assíncrono para SQLite ou PostgreSQL
-connect_args = {"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {}
+def get_normalized_database_url(raw_url: str) -> str:
+    url = raw_url.strip()
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+    if "sslmode=require" in url:
+        url = url.replace("sslmode=require", "ssl=require")
+    return url
+
+
+database_url = get_normalized_database_url(settings.DATABASE_URL)
+connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
 
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    database_url,
     echo=False,
+    pool_pre_ping=True,
     connect_args=connect_args,
 )
 

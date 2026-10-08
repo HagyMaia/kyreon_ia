@@ -19,12 +19,20 @@ SQLITE_URL = "sqlite+aiosqlite:///./agent_platform.db"
 
 
 async def migrate(target_postgres_url: str):
+    target_url = target_postgres_url.strip()
+    if target_url.startswith("postgresql://"):
+        target_url = target_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    elif target_url.startswith("postgres://"):
+        target_url = target_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    if "sslmode=require" in target_url:
+        target_url = target_url.replace("sslmode=require", "ssl=require")
+
     print(f"--> Conectando ao SQLite: {SQLITE_URL}")
     sqlite_engine = create_async_engine(SQLITE_URL, echo=False)
     sqlite_session_maker = async_sessionmaker(sqlite_engine, expire_on_commit=False)
 
-    print(f"--> Conectando ao PostgreSQL: {target_postgres_url}")
-    pg_engine = create_async_engine(target_postgres_url, echo=False)
+    print(f"--> Conectando ao PostgreSQL: {target_url}")
+    pg_engine = create_async_engine(target_url, echo=False, pool_pre_ping=True)
     pg_session_maker = async_sessionmaker(pg_engine, expire_on_commit=False)
 
     # Cria tabelas no PostgreSQL
