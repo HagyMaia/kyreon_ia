@@ -8,9 +8,11 @@ from app.api.routes.conversations import router as conversations_router
 from app.api.routes.health import router as health_router
 from app.api.routes.models import router as models_router
 from app.api.routes.tools import router as tools_router
+from app.api.routes.files import router as files_router
 from app.core.config import settings
 from app.core.database import Base, async_session_maker, engine
 from app.services.agent_service import agent_service
+
 
 
 @asynccontextmanager
@@ -50,6 +52,8 @@ app.include_router(agents_router, prefix="/api")
 app.include_router(conversations_router, prefix="/api")
 app.include_router(models_router, prefix="/api")
 app.include_router(tools_router, prefix="/api")
+app.include_router(files_router, prefix="/api")
+
 
 
 @app.get("/")

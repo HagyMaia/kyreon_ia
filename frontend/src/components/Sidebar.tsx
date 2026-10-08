@@ -3,9 +3,9 @@ import {
   MessageSquare,
   Plus,
   Settings,
-  Sparkles,
   Trash2,
 } from "lucide-react";
+import { KyreonAvatar } from "./KyreonAvatar";
 import type { Conversation, SystemHealth } from "../types";
 
 interface SidebarProps {
@@ -32,9 +32,7 @@ export function Sidebar({
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="brand-mark">
-          <Sparkles size={18} />
-        </div>
+        <KyreonAvatar size="sm" showStatus glow />
         <div>
           <strong>Kyreon AI</strong>
           <span className="brand-sub">Agent Platform</span>

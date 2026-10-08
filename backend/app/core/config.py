@@ -14,10 +14,10 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = ""
 
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.0-flash"
+    GEMINI_MODEL: str = "gemini-3.5-flash-lite"
 
-    # Default provider: "openai" | "gemini" | "mock"
-    DEFAULT_PROVIDER: str = "mock"
+    # Default provider: "gemini" | "openai" | "mock"
+    DEFAULT_PROVIDER: str = "gemini"
 
     # CORS
     CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
@@ -39,12 +39,12 @@ class Settings(BaseSettings):
     @property
     def active_provider(self) -> str:
         """Determina automaticamente o provedor ativo baseado nas chaves disponíveis."""
-        if self.DEFAULT_PROVIDER and self.DEFAULT_PROVIDER != "mock":
+        if self.DEFAULT_PROVIDER and self.DEFAULT_PROVIDER not in ["mock", "auto"]:
             return self.DEFAULT_PROVIDER
-        if self.OPENAI_API_KEY:
-            return "openai"
         if self.GEMINI_API_KEY:
             return "gemini"
+        if self.OPENAI_API_KEY:
+            return "openai"
         return "mock"
 
 

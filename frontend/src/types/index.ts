@@ -83,3 +83,14 @@ export interface SystemHealth {
   openai_configured: boolean;
   gemini_configured: boolean;
 }
+
+export interface FileUploadResponse {
+  filename: string;
+  extension: string;
+  size_bytes: number;
+  character_count: number;
+  content: string;
+  preview: string;
+  status: string;
+  message: string;
+}

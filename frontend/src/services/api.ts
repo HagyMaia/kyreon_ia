@@ -4,6 +4,7 @@ import type {
   ChatResponse,
   Conversation,
   ConversationDetail,
+  FileUploadResponse,
   Message,
   ModelInfo,
   SystemHealth,
@@ -159,3 +160,21 @@ export async function fetchHealth(): Promise<SystemHealth> {
   if (!res.ok) throw new Error("Erro ao verificar status do sistema");
   return res.json();
 }
+
+export async function uploadFile(file: File): Promise<FileUploadResponse> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(`${API_URL}/files/upload`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || "Falha ao enviar e processar o arquivo.");
+  }
+
+  return res.json();
+}
+

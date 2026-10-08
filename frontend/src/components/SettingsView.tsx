@@ -57,9 +57,9 @@ export function SettingsView({ health, models }: SettingsViewProps) {
               )}
             </div>
             <div className="status-row">
-              <span>Google Gemini (Gemini 2.0 / 1.5):</span>
+              <span>Google Gemini (Gemini 3.5 Flash Lite):</span>
               {health?.gemini_configured ? (
-                <span className="badge-ok"><CheckCircle2 size={14} /> Configurado</span>
+                <span className="badge-ok"><CheckCircle2 size={14} /> Ativo & Cota Gratuita</span>
               ) : (
                 <span className="badge-warn"><XCircle size={14} /> Chave ausente (.env)</span>
               )}

@@ -1,6 +1,13 @@
 from typing import Any
 from app.services.tools.base import BaseTool
-from app.services.tools.builtin import CalculatorTool, CurrentDateTimeTool, WebSearchTool
+from app.services.tools.builtin import (
+    CalculatorTool,
+    CurrentDateTimeTool,
+    DelegateToSpecialistTool,
+    ManausWeatherTool,
+    SaveUserMemoryTool,
+    WebSearchTool,
+)
 
 
 class ToolRegistry:
@@ -12,6 +19,10 @@ class ToolRegistry:
         self.register(CurrentDateTimeTool())
         self.register(CalculatorTool())
         self.register(WebSearchTool())
+        self.register(ManausWeatherTool())
+        self.register(SaveUserMemoryTool())
+        self.register(DelegateToSpecialistTool())
+
 
     def register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool

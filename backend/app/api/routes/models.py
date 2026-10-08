@@ -5,41 +5,41 @@ from app.schemas.model import ModelInfo
 router = APIRouter(prefix="/models", tags=["models"])
 
 AVAILABLE_MODELS = [
+    # Google Gemini Models (Ativos com cota gratuita)
+    ModelInfo(
+        id="gemini-3.5-flash-lite",
+        name="Gemini 3.5 Flash Lite (Recomendado)",
+        provider="gemini",
+        description="Ultra-rápido, inteligente e com cota gratuita ativa pelo Google AI Studio.",
+        context_window=1048576,
+        supports_tools=True,
+        supports_streaming=True,
+    ),
+    ModelInfo(
+        id="gemini-flash-lite-latest",
+        name="Gemini Flash Lite (Latest)",
+        provider="gemini",
+        description="Versão mais recente e leve da família Gemini.",
+        context_window=1048576,
+        supports_tools=True,
+        supports_streaming=True,
+    ),
     # OpenAI Models
     ModelInfo(
         id="gpt-4o-mini",
-        name="GPT-4o Mini",
+        name="GPT-4o Mini (OpenAI)",
         provider="openai",
-        description="Rápido, inteligente e de altíssimo custo-benefício.",
+        description="Rápido e inteligente (requer saldo pré-pago de créditos na conta OpenAI).",
         context_window=128000,
         supports_tools=True,
         supports_streaming=True,
     ),
     ModelInfo(
         id="gpt-4o",
-        name="GPT-4o",
+        name="GPT-4o (OpenAI)",
         provider="openai",
-        description="Modelo flagship multimodal da OpenAI de alta capacidade de raciocínio.",
+        description="Modelo flagship avançado (requer saldo pré-pago de créditos na conta OpenAI).",
         context_window=128000,
-        supports_tools=True,
-        supports_streaming=True,
-    ),
-    # Google Gemini Models
-    ModelInfo(
-        id="gemini-2.0-flash",
-        name="Gemini 2.0 Flash",
-        provider="gemini",
-        description="Modelo de última geração ultra-rápido do Google DeepMind.",
-        context_window=1048576,
-        supports_tools=True,
-        supports_streaming=True,
-    ),
-    ModelInfo(
-        id="gemini-1.5-pro",
-        name="Gemini 1.5 Pro",
-        provider="gemini",
-        description="Janela de contexto massiva de 2 milhões de tokens com raciocínio complexo.",
-        context_window=2097152,
         supports_tools=True,
         supports_streaming=True,
     ),

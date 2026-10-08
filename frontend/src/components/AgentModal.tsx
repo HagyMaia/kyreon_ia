@@ -23,7 +23,7 @@ export function AgentModal({
   const [role, setRole] = useState("");
   const [description, setDescription] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
-  const [model, setModel] = useState("gpt-4o-mini");
+  const [model, setModel] = useState("gemini-3.5-flash-lite");
   const [temperature, setTemperature] = useState(0.7);
   const [selectedTools, setSelectedTools] = useState<string[]>(["get_current_datetime", "calculator"]);
   const [avatar, setAvatar] = useState("✦");

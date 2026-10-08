@@ -6,6 +6,9 @@ import { ChatInput } from "./components/ChatInput";
 import { AgentModal } from "./components/AgentModal";
 import { AgentsView } from "./components/AgentsView";
 import { SettingsView } from "./components/SettingsView";
+import { ThemeToggle } from "./components/ThemeToggle";
+import { WeatherFloatingWidget } from "./components/WeatherFloatingWidget";
+import { VoiceConversationModal } from "./components/VoiceConversationModal";
 import {
   createAgent,
   deleteAgent,
@@ -32,6 +35,21 @@ import type {
 export default function App() {
   const [activeView, setActiveView] = useState<"chat" | "agents" | "settings">("chat");
 
+  // Modo Claro e Escuro persistente
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    const saved = localStorage.getItem("kyreon_theme");
+    return saved === "light" || saved === "dark" ? saved : "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("kyreon_theme", theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  };
+
   // Dados do Sistema
   const [agents, setAgents] = useState<Agent[]>([]);
   const [activeAgent, setActiveAgent] = useState<Agent>();
@@ -44,9 +62,12 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversationId, setConversationId] = useState<string>();
   const [loading, setLoading] = useState(false);
+  const [autoSpeak, setAutoSpeak] = useState(false);
+  const [thinkingMode, setThinkingMode] = useState(false);
 
   // Modais
   const [isAgentModalOpen, setIsAgentModalOpen] = useState(false);
+  const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
 
   // Carrega dados iniciais
   useEffect(() => {
@@ -151,21 +172,74 @@ export default function App() {
     handleNewChat();
   }
 
-  async function handleSend(content: string) {
+  async function handleSend(content: string): Promise<string | void> {
+    const promptToSend =
+      thinkingMode && !content.startsWith("[MODO PENSAR]")
+        ? `[MODO PENSAR ATIVADO: Analise detalhadamente com raciocínio profundo passo a passo antes de responder]\n\n${content}`
+        : content;
+
     const userMessage: Message = { role: "user", content };
     const history = [...messages];
 
     setMessages((current) => [...current, userMessage]);
     setLoading(true);
 
-    // Adiciona placeholder da resposta do assistente para streaming
+    const hasTools = activeAgent?.tools && activeAgent.tools.length > 0;
+
+    // Se o agente possui ferramentas (ex: Kyreon Orquestrador), usa chamada com orquestração de tools e handoff
+    if (hasTools) {
+      const assistantIndex = messages.length + 1;
+      setMessages((current) => [
+        ...current,
+        {
+          role: "assistant",
+          content: "⚡ Kyreon está processando e orquestrando as ferramentas...",
+        },
+      ]);
+
+      try {
+        const result = await sendMessage(
+          promptToSend,
+          history,
+          conversationId,
+          activeAgent?.id
+        );
+        setConversationId(result.conversation_id);
+        setMessages((current) => {
+          const updated = [...current];
+          updated[assistantIndex] = {
+            role: "assistant",
+            content: result.content,
+            tool_calls: result.tool_calls,
+          };
+          return updated;
+        });
+        reloadConversations();
+        return result.content;
+      } catch (err: any) {
+        const errorMsg = `⚠️ Falha ao processar solicitação: ${err.message || "Erro de conexão"}`;
+        setMessages((current) => {
+          const updated = [...current];
+          updated[assistantIndex] = {
+            role: "assistant",
+            content: errorMsg,
+          };
+          return updated;
+        });
+        return errorMsg;
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    // Para agentes sem ferramentas, streaming contínuo em tempo real
     const assistantIndex = messages.length + 1;
     let accumulatedContent = "";
 
     try {
       // Tenta streaming SSE em tempo real
       await streamMessage(
-        content,
+        promptToSend,
         history,
         conversationId,
         activeAgent?.id,
@@ -197,11 +271,12 @@ export default function App() {
           },
         }
       );
+      return accumulatedContent;
     } catch (streamErr) {
       console.warn("Falha no streaming, tentando fallback síncrono:", streamErr);
       try {
         const result = await sendMessage(
-          content,
+          promptToSend,
           history,
           conversationId,
           activeAgent?.id
@@ -216,15 +291,18 @@ export default function App() {
           },
         ]);
         reloadConversations();
+        return result.content;
       } catch {
+        const fallbackErr =
+          "⚠️ Não foi possível se conectar ao agente. Verifique se o backend está em execução.";
         setMessages((current) => [
           ...current,
           {
             role: "assistant",
-            content:
-              "⚠️ Não foi possível se conectar ao agente. Verifique se o backend está em execução.",
+            content: fallbackErr,
           },
         ]);
+        return fallbackErr;
       }
     } finally {
       setLoading(false);
@@ -253,6 +331,9 @@ export default function App() {
           </div>
 
           <div className="topbar-right">
+            {/* Alternador de Modo Claro / Escuro */}
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
+
             {/* Seletor de Agente Ativo */}
             <div className="agent-selector-wrapper">
               <select
@@ -288,7 +369,8 @@ export default function App() {
             <MessageList
               messages={messages}
               activeAgent={activeAgent}
-              onPromptSuggestion={handleSend}
+              userName="Hagy"
+              autoSpeak={autoSpeak}
             />
 
             {loading && !messages.some((m) => m.role === "assistant" && m.content) && (
@@ -304,8 +386,13 @@ export default function App() {
                 placeholder={
                   activeAgent
                     ? `Pergunte ao ${activeAgent.name}...`
-                    : "Pergunte qualquer coisa..."
+                    : "Pergunte qualquer coisa"
                 }
+                autoSpeak={autoSpeak}
+                onToggleAutoSpeak={() => setAutoSpeak((prev) => !prev)}
+                thinkingMode={thinkingMode}
+                onToggleThinkingMode={() => setThinkingMode((prev) => !prev)}
+                onOpenVoiceModal={() => setIsVoiceModalOpen(true)}
               />
               <small>
                 {activeAgent?.name} ({activeAgent?.model}) • Respostas geradas por IA.
@@ -339,6 +426,18 @@ export default function App() {
         onSave={handleCreateAgent}
         availableModels={models}
         availableTools={tools}
+      />
+
+      {/* Widget Flutuante de Manaus - Clima, Previsão de Chuva e Horas */}
+      <WeatherFloatingWidget />
+
+      {/* Modo Conversa por Voz Interativo (estilo ChatGPT Voice) */}
+      <VoiceConversationModal
+        isOpen={isVoiceModalOpen}
+        onClose={() => setIsVoiceModalOpen(false)}
+        onSendMessage={handleSend}
+        activeAgent={activeAgent}
+        userName="Hagy"
       />
     </div>
   );

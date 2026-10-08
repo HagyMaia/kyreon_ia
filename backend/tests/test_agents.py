@@ -5,7 +5,7 @@ def test_list_agents(client):
     agents = response.json()
     assert len(agents) >= 3
     agent_names = [a["name"] for a in agents]
-    assert "Kyreon Assistente Geral" in agent_names
+    assert "Kyreon Orquestrador & Assistente" in agent_names
 
 
 def test_create_and_delete_custom_agent(client):
