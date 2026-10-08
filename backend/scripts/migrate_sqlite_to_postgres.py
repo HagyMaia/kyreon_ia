@@ -6,10 +6,15 @@ Uso:
 
 import asyncio
 import sys
+from pathlib import Path
+
+# Adiciona o diretório backend ao sys.path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
-from app.core.database import Base
+from app.core.database import Base, get_normalized_database_url
 from app.models.agent import AgentModel
 from app.models.conversation import ConversationModel
 from app.models.message import MessageModel
@@ -19,13 +24,7 @@ SQLITE_URL = "sqlite+aiosqlite:///./agent_platform.db"
 
 
 async def migrate(target_postgres_url: str):
-    target_url = target_postgres_url.strip()
-    if target_url.startswith("postgresql://"):
-        target_url = target_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    elif target_url.startswith("postgres://"):
-        target_url = target_url.replace("postgres://", "postgresql+asyncpg://", 1)
-    if "sslmode=require" in target_url:
-        target_url = target_url.replace("sslmode=require", "ssl=require")
+    target_url = get_normalized_database_url(target_postgres_url)
 
     print(f"--> Conectando ao SQLite: {SQLITE_URL}")
     sqlite_engine = create_async_engine(SQLITE_URL, echo=False)
@@ -45,7 +44,9 @@ async def migrate(target_postgres_url: str):
         # 1. Agentes
         agents = (await src.execute(select(AgentModel))).scalars().all()
         print(f"--> Migrando {len(agents)} agente(s)...")
+        valid_agent_ids = set()
         for a in agents:
+            valid_agent_ids.add(a.id)
             await dst.merge(
                 AgentModel(
                     id=a.id,
@@ -63,11 +64,17 @@ async def migrate(target_postgres_url: str):
                     updated_at=a.updated_at,
                 )
             )
+        await dst.flush()
 
         # 2. Conversas
         convs = (await src.execute(select(ConversationModel))).scalars().all()
-        print(f"--> Migrando {len(convs)} conversa(s)...")
+        print(f"--> Analisando {len(convs)} conversa(s)...")
+        valid_conv_ids = set()
         for c in convs:
+            if c.agent_id and c.agent_id not in valid_agent_ids:
+                print(f"    [INFO] Ignorando conversa de teste órfã {c.id} (agente inexistente: '{c.agent_id}')")
+                continue
+            valid_conv_ids.add(c.id)
             await dst.merge(
                 ConversationModel(
                     id=c.id,
@@ -77,11 +84,16 @@ async def migrate(target_postgres_url: str):
                     updated_at=c.updated_at,
                 )
             )
+        await dst.flush()
 
         # 3. Mensagens
         msgs = (await src.execute(select(MessageModel))).scalars().all()
-        print(f"--> Migrando {len(msgs)} mensagem(ns)...")
+        print(f"--> Analisando {len(msgs)} mensagem(ns)...")
+        migrated_msgs = 0
         for m in msgs:
+            if m.conversation_id not in valid_conv_ids:
+                continue
+            migrated_msgs += 1
             await dst.merge(
                 MessageModel(
                     id=m.id,
@@ -92,6 +104,8 @@ async def migrate(target_postgres_url: str):
                     created_at=m.created_at,
                 )
             )
+        print(f"    [INFO] {migrated_msgs} mensagem(ns) válidas migradas.")
+        await dst.flush()
 
         # 4. Memórias
         mems = (await src.execute(select(MemoryModel))).scalars().all()

@@ -103,37 +103,22 @@ DEFAULT_AGENTS = [
 
 class AgentService:
     async def init_default_agents(self, db: AsyncSession) -> None:
-        """Inicializa ou atualiza os agentes padrão no banco de dados."""
+        """Inicializa ou atualiza os agentes padrão no banco de dados de forma idempotente."""
         for agent_def in DEFAULT_AGENTS:
-            query = select(AgentModel).where(AgentModel.id == agent_def["id"])
-            result = await db.execute(query)
-            existing = result.scalar_one_or_none()
-            if not existing:
-                agent = AgentModel(
-                    id=agent_def["id"],
-                    name=agent_def["name"],
-                    role=agent_def["role"],
-                    description=agent_def["description"],
-                    system_prompt=agent_def["system_prompt"],
-                    provider=agent_def["provider"],
-                    model=agent_def["model"],
-                    temperature=agent_def["temperature"],
-                    tools=json.dumps(agent_def["tools"]),
-                    avatar=agent_def["avatar"],
-                    is_default=agent_def["is_default"],
-                )
-                db.add(agent)
-            else:
-                existing.name = agent_def["name"]
-                existing.role = agent_def["role"]
-                existing.description = agent_def["description"]
-                existing.system_prompt = agent_def["system_prompt"]
-                existing.provider = agent_def["provider"]
-                existing.model = agent_def["model"]
-                existing.temperature = agent_def["temperature"]
-                existing.tools = json.dumps(agent_def["tools"])
-                existing.avatar = agent_def["avatar"]
-                existing.is_default = agent_def["is_default"]
+            agent = AgentModel(
+                id=agent_def["id"],
+                name=agent_def["name"],
+                role=agent_def["role"],
+                description=agent_def["description"],
+                system_prompt=agent_def["system_prompt"],
+                provider=agent_def["provider"],
+                model=agent_def["model"],
+                temperature=agent_def["temperature"],
+                tools=json.dumps(agent_def["tools"]),
+                avatar=agent_def["avatar"],
+                is_default=agent_def["is_default"],
+            )
+            await db.merge(agent)
         await db.commit()
 
 

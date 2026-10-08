@@ -8,15 +8,28 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.core.config import settings
 
+import urllib.parse
+
 def get_normalized_database_url(raw_url: str) -> str:
     url = raw_url.strip()
-    if url.startswith("postgresql://"):
-        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    elif url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
-    if "sslmode=require" in url:
-        url = url.replace("sslmode=require", "ssl=require")
-    return url
+    if url.startswith("sqlite"):
+        return url
+    parsed = urllib.parse.urlsplit(url)
+    scheme = parsed.scheme
+    if scheme in ("postgresql", "postgres"):
+        scheme = "postgresql+asyncpg"
+    elif not scheme.startswith("postgresql+"):
+        scheme = "postgresql+asyncpg"
+
+    query_params = urllib.parse.parse_qs(parsed.query)
+    # Remove libpq-specific params unsupported by asyncpg
+    query_params.pop("channel_binding", None)
+    had_sslmode = query_params.pop("sslmode", None)
+    if had_sslmode or "ssl" in query_params or "neon.tech" in parsed.netloc:
+        query_params["ssl"] = ["require"]
+
+    new_query = urllib.parse.urlencode(query_params, doseq=True)
+    return urllib.parse.urlunsplit((scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
 
 
 database_url = get_normalized_database_url(settings.DATABASE_URL)
