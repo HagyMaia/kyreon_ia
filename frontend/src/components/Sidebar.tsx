@@ -4,6 +4,7 @@ import {
   Plus,
   Settings,
   Trash2,
+  X,
 } from "lucide-react";
 import { KyreonAvatar } from "./KyreonAvatar";
 import type { Conversation, SystemHealth } from "../types";
@@ -17,6 +18,8 @@ interface SidebarProps {
   onSelectConversation: (id: string) => void;
   onDeleteConversation: (id: string, e: React.MouseEvent) => void;
   health: SystemHealth | null;
+  isOpen?: boolean;
+  onClose?: () => void;
 }
 
 export function Sidebar({
@@ -28,40 +31,59 @@ export function Sidebar({
   onSelectConversation,
   onDeleteConversation,
   health,
+  isOpen = false,
+  onClose,
 }: SidebarProps) {
+  const handleItemClick = (action: () => void) => {
+    action();
+    if (onClose) onClose();
+  };
+
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${isOpen ? "open" : ""}`}>
       <div className="brand">
-        <KyreonAvatar size="sm" showStatus glow />
-        <div>
-          <strong>Kyreon AI</strong>
-          <span className="brand-sub">Agent Platform</span>
+        <div className="brand-title-wrap">
+          <KyreonAvatar size="sm" showStatus glow />
+          <div>
+            <strong>Kyreon AI</strong>
+            <span className="brand-sub">Agent Platform</span>
+          </div>
         </div>
+        {onClose && (
+          <button
+            className="sidebar-close-btn"
+            onClick={onClose}
+            title="Fechar menu"
+            aria-label="Fechar menu"
+          >
+            <X size={18} />
+          </button>
+        )}
       </div>
 
-      <button className="new-chat" onClick={onNewChat}>
+      <button className="new-chat" onClick={() => handleItemClick(onNewChat)}>
         <Plus size={17} />
-        Novo chat
+        <span>Novo chat</span>
       </button>
 
       <nav className="sidebar-nav">
         <button
           className={`nav-item ${activeView === "chat" ? "active" : ""}`}
-          onClick={() => onChangeView("chat")}
+          onClick={() => handleItemClick(() => onChangeView("chat"))}
         >
-          <MessageSquare size={17} /> Chat
+          <MessageSquare size={17} /> <span>Chat</span>
         </button>
         <button
           className={`nav-item ${activeView === "agents" ? "active" : ""}`}
-          onClick={() => onChangeView("agents")}
+          onClick={() => handleItemClick(() => onChangeView("agents"))}
         >
-          <Bot size={17} /> Agentes
+          <Bot size={17} /> <span>Agentes</span>
         </button>
         <button
           className={`nav-item ${activeView === "settings" ? "active" : ""}`}
-          onClick={() => onChangeView("settings")}
+          onClick={() => handleItemClick(() => onChangeView("settings"))}
         >
-          <Settings size={17} /> Configurações
+          <Settings size={17} /> <span>Configurações</span>
         </button>
       </nav>
 
@@ -74,7 +96,7 @@ export function Sidebar({
             <div
               key={conv.id}
               className={`conv-item ${conv.id === activeConversationId ? "active" : ""}`}
-              onClick={() => onSelectConversation(conv.id)}
+              onClick={() => handleItemClick(() => onSelectConversation(conv.id))}
             >
               <MessageSquare size={14} className="conv-icon" />
               <span className="conv-title" title={conv.title}>

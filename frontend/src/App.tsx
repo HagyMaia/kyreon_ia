@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, Plus, Sparkles, Bot } from "lucide-react";
+import { ChevronDown, Plus, Sparkles, Bot, Menu } from "lucide-react";
 import { Sidebar } from "./components/Sidebar";
 import { MessageList } from "./components/MessageList";
 import { ChatInput } from "./components/ChatInput";
@@ -65,7 +65,8 @@ export default function App() {
   const [autoSpeak, setAutoSpeak] = useState(false);
   const [thinkingMode, setThinkingMode] = useState(false);
 
-  // Modais
+  // Modais e Menu Mobile
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAgentModalOpen, setIsAgentModalOpen] = useState(false);
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
 
@@ -311,6 +312,15 @@ export default function App() {
 
   return (
     <div className="app">
+      {/* Backdrop para fechar o menu no mobile */}
+      {isSidebarOpen && (
+        <div
+          className="sidebar-backdrop"
+          onClick={() => setIsSidebarOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
       <Sidebar
         onNewChat={handleNewChat}
         activeView={activeView}
@@ -320,12 +330,23 @@ export default function App() {
         onSelectConversation={handleSelectConversation}
         onDeleteConversation={handleDeleteConversation}
         health={health}
+        isOpen={isSidebarOpen}
+        onClose={() => setIsSidebarOpen(false)}
       />
 
       <main className="main">
         {/* Topbar */}
         <header className="topbar">
           <div className="topbar-left">
+            <button
+              type="button"
+              className="mobile-menu-btn"
+              onClick={() => setIsSidebarOpen(true)}
+              title="Abrir menu lateral"
+              aria-label="Abrir menu"
+            >
+              <Menu size={20} />
+            </button>
             <span className="status-dot-active" />
             <span className="status-label">Agente online</span>
           </div>
@@ -358,7 +379,7 @@ export default function App() {
               title="Criar novo agente"
             >
               <Plus size={15} />
-              <span>Novo Agente</span>
+              <span className="btn-create-label">Novo Agente</span>
             </button>
           </div>
         </header>
