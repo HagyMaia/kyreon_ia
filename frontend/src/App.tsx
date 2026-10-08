@@ -20,6 +20,7 @@ import {
   fetchHealth,
   fetchModels,
   fetchTools,
+  getApiBaseUrl,
   sendMessage,
   streamMessage,
 } from "./services/api";
@@ -374,7 +375,9 @@ export default function App() {
         console.error("[Kyreon Fallback Error]:", fallbackErr);
         setChatStatus("error");
         const fallbackMsg =
-          "⚠️ Não foi possível se conectar ao agente. Verifique se o backend está em execução.";
+          `⚠️ Não foi possível conectar ao agente em: ${getApiBaseUrl()}.\n\n` +
+          `• Para iniciar o backend localmente: dê um duplo clique no arquivo 'iniciar_local.bat' ou execute 'uvicorn app.main:app' na pasta backend.\n` +
+          `• Se estiver usando a Vercel: configure o endpoint do backend nas Configurações da plataforma.`;
         setMessages((current) => [
           ...current,
           {
@@ -382,7 +385,7 @@ export default function App() {
             content: fallbackMsg,
           },
         ]);
-        setTimeout(() => setChatStatus("idle"), 4000);
+        setTimeout(() => setChatStatus("idle"), 5000);
         return fallbackMsg;
       }
     } finally {
@@ -570,7 +573,15 @@ export default function App() {
 
         {activeView === "settings" && (
           <section className="workspace-full">
-            <SettingsView health={health} models={models} />
+            <SettingsView
+              health={health}
+              models={models}
+              onRefreshHealth={() => {
+                fetchHealth()
+                  .then(setHealth)
+                  .catch(() => setHealth(null));
+              }}
+            />
           </section>
         )}
       </main>

@@ -116,9 +116,11 @@ export function Sidebar({
 
       <div className="sidebar-footer">
         <div className="provider-badge">
-          <span className="status-dot-active" />
+          <span className={health ? "status-dot-active" : "status-dot-processing"} />
           <span className="provider-text">
-            Provedor: <strong>{health?.active_provider || "detectando..."}</strong>
+            {health
+              ? `Backend: ${health.active_provider?.toUpperCase()}`
+              : "Modo Demonstração (Offline)"}
           </span>
         </div>
       </div>

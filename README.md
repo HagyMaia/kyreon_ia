@@ -95,26 +95,36 @@ kyreon_IA/
 
 ## ⚡ Como Executar Localmente
 
-### 1. Backend (Python + FastAPI)
+### Opção 1: Inicialização Automática em 1 Clique (Windows — Recomendado) 🚀
+
+Dê um duplo clique no arquivo:
+📁 **`iniciar_local.bat`** (ou execute `.\iniciar_local.ps1` no PowerShell)
+
+O script detecta automaticamente o ambiente Python (`.venv`), inicia o backend na porta 8000, o frontend na porta 5173 e abre o navegador automaticamente em `http://localhost:5173`!
+
+---
+
+### Opção 2: Inicialização Manual em Terminais Separados
+
+#### 1. Backend (Python + FastAPI)
 
 ```bash
 cd backend
 
-# Ativar ambiente virtual:
 # Windows (PowerShell):
 .\.venv\Scripts\activate
 # Linux/macOS:
 # source .venv/bin/activate
 
-# Executar a API:
-uvicorn app.main:app --reload --port 8000
+# Executar a API em todas as interfaces de rede (IPv4 e LAN mobile):
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 - **API:** http://localhost:8000
 - **Documentação Interativa (Swagger):** http://localhost:8000/docs
 - **Healthcheck:** http://localhost:8000/api/health
 
-### 2. Frontend (React + Vite)
+#### 2. Frontend (React + Vite)
 
 Em outro terminal:
 
@@ -124,6 +134,19 @@ npm run dev
 ```
 
 - **Painel:** http://localhost:5173
+
+---
+
+## 🌐 Deploy em Produção (Vercel + Backend na Nuvem)
+
+O frontend do Kyreon está configurado para deploy imediato na **Vercel**. 
+Para conectar o frontend online à IA em nuvem:
+
+1. **Hospede o Backend Python:** Faça o deploy da pasta `backend/` em um provedor como [Render.com](https://render.com), [Railway.app](https://railway.app) ou [Fly.io](https://fly.io).
+2. **Conecte o Frontend:**
+   - No painel da **Vercel**: Adicione a variável de ambiente `VITE_API_URL` com a URL do seu backend (ex: `https://kyreon-api.onrender.com/api`).
+   - Ou diretamente na interface web: Acesse a aba **Configurações** no Kyreon e cole o endpoint do seu backend!
+3. **Modo Demonstração Offline:** Caso o backend esteja offline ou ainda não hospedado, o Kyreon ativa automaticamente o **Modo Demonstração no Navegador**, permitindo interagir, testar voz (TTS/microfone), alternar temas e avaliar o layout responsivo sem travar a interface!
 
 ---
 
