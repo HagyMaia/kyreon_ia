@@ -34,7 +34,7 @@ DEFAULT_AGENTS = [
             "Responda sempre em português do Brasil com formatação markdown rica, clara e objetiva."
         ),
         "provider": "gemini",
-        "model": "gemini-3.5-flash-lite",
+        "model": "gemini-flash-lite-latest",
         "temperature": 0.7,
         "tools": [
             "get_current_datetime",
@@ -58,7 +58,7 @@ DEFAULT_AGENTS = [
             "Ao sugerir código, explique as decisões técnicas e use blocos markdown com destaque de sintaxe."
         ),
         "provider": "gemini",
-        "model": "gemini-3.5-flash-lite",
+        "model": "gemini-flash-lite-latest",
         "temperature": 0.3,
         "tools": ["calculator", "get_current_datetime", "web_search"],
         "avatar": "💻",
@@ -75,7 +75,7 @@ DEFAULT_AGENTS = [
             "Use bullet points e cite fontes ou passos de verificação sempre que possível."
         ),
         "provider": "gemini",
-        "model": "gemini-3.5-flash-lite",
+        "model": "gemini-flash-lite-latest",
         "temperature": 0.4,
         "tools": ["web_search", "get_current_datetime"],
         "avatar": "🔍",
@@ -92,7 +92,7 @@ DEFAULT_AGENTS = [
             "economia da Zona Franca e biodiversidade da Amazônia. Responda com profundo conhecimento local."
         ),
         "provider": "gemini",
-        "model": "gemini-3.5-flash-lite",
+        "model": "gemini-flash-lite-latest",
         "temperature": 0.5,
         "tools": ["get_manaus_weather", "get_current_datetime", "web_search"],
         "avatar": "🌿",
@@ -346,6 +346,26 @@ class AgentService:
                         f"> *\"{res.get('conteudo')}\"* (Categoria: `{res.get('categoria')}`)\n\n"
                         f"Kyreon guardou essa informação na memória persistente para todas as próximas conversas."
                     )
+                elif tc.name == "calculator" and isinstance(res, dict):
+                    expr = res.get("expression", tc.arguments.get("expression", ""))
+                    result_val = res.get("result", res.get("error", ""))
+                    synthesized_parts.append(f"🔢 **Cálculo:** `{expr}` = **{result_val}**")
+                elif tc.name == "get_current_datetime" and isinstance(res, dict):
+                    synthesized_parts.append(f"🕒 **Data e Hora Atual:** {res.get('formatted', res.get('utc', ''))}")
+                elif tc.name == "web_search" and isinstance(res, dict):
+                    q = res.get("query", "")
+                    summary = res.get("summary", "")
+                    source = res.get("source", "")
+                    if summary:
+                        src_md = f" ([fonte]({source}))" if source else ""
+                        synthesized_parts.append(f"🔎 **Pesquisa Web sobre '{q}':**\n{summary}{src_md}")
+                    else:
+                        synthesized_parts.append(f"🔎 Busca realizada para o termo *\"{q}\"*.")
+                else:
+                    if isinstance(res, dict) and "error" in res:
+                        synthesized_parts.append(f"⚠️ *{tc.name}:* {res['error']}")
+                    elif isinstance(res, dict) and "result" in res:
+                        synthesized_parts.append(f"🔧 **{tc.name}:** {res['result']}")
 
         final_content = (response.content or "").strip()
         if synthesized_parts:
@@ -355,7 +375,7 @@ class AgentService:
             else:
                 final_content = tool_text
         elif not final_content:
-            final_content = "Ação executada com sucesso pelo agente."
+            final_content = "Olá! Como posso ajudar você hoje?"
 
         # Salva mensagem do assistente
         msg_record = await conversation_service.add_message(

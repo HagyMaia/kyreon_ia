@@ -26,13 +26,14 @@ class GeminiProvider(BaseLLMProvider):
             "gemini-1.5-flash",
             "gemini-2.5-flash",
             "gemini-2.5-pro",
+            "gemini-3.5-flash-lite",
             "gemini-pro-latest",
             "gpt-4o-mini",
             "gpt-4o",
             "mock-model",
             "auto",
         ]:
-            return "gemini-3.5-flash-lite"
+            return "gemini-flash-lite-latest"
         return m
 
     async def chat(
@@ -71,12 +72,28 @@ class GeminiProvider(BaseLLMProvider):
             tools=gemini_tools,
         )
 
-        response = await asyncio.to_thread(
-            self.client.models.generate_content,
-            model=model_name,
-            contents=contents,
-            config=config,
-        )
+        models_to_try = [model_name]
+        alt_model = "gemini-flash-latest" if model_name != "gemini-flash-latest" else "gemini-flash-lite-latest"
+        models_to_try.append(alt_model)
+
+        response = None
+        last_error = None
+        for m in models_to_try:
+            try:
+                response = await asyncio.to_thread(
+                    self.client.models.generate_content,
+                    model=m,
+                    contents=contents,
+                    config=config,
+                )
+                model_name = m
+                break
+            except Exception as e:
+                last_error = e
+                continue
+
+        if response is None and last_error:
+            raise last_error
 
         tool_calls: list[ToolCall] = []
         if getattr(response, "function_calls", None):
@@ -117,15 +134,37 @@ class GeminiProvider(BaseLLMProvider):
             temperature=temperature,
         )
 
-        def _get_stream():
-            return self.client.models.generate_content_stream(
-                model=model_name,
-                contents=contents,
-                config=config,
-            )
+        models_to_try = [model_name]
+        alt_model = "gemini-flash-latest" if model_name != "gemini-flash-latest" else "gemini-flash-lite-latest"
+        models_to_try.append(alt_model)
 
-        stream = await asyncio.to_thread(_get_stream)
-        for chunk in stream:
-            if chunk.text:
-                yield chunk.text
-                await asyncio.sleep(0.005)
+        success = False
+        last_error = None
+        for m in models_to_try:
+            started = False
+            try:
+                def _get_stream(sel_model=m):
+                    return self.client.models.generate_content_stream(
+                        model=sel_model,
+                        contents=contents,
+                        config=config,
+                    )
+
+                stream = await asyncio.to_thread(_get_stream)
+                for chunk in stream:
+                    started = True
+                    if chunk.text:
+                        yield chunk.text
+                        await asyncio.sleep(0.005)
+                success = True
+                break
+            except Exception as e:
+                last_error = e
+                # Se o erro ocorreu antes de emitir qualquer token para o cliente, tenta o modelo alternativo
+                if not started:
+                    continue
+                else:
+                    raise e
+
+        if not success and last_error:
+            raise last_error
