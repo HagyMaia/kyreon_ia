@@ -272,6 +272,7 @@ export interface SpeechRecognitionController {
   start: () => void;
   stop: () => void;
   abort: () => void;
+  isActive?: () => boolean;
 }
 
 /**
@@ -406,12 +407,21 @@ export function deduplicateSpeechResults(
   };
 }
 
-export function createSpeechRecognition(options: {
+export interface SpeechRecognitionOptions {
   onTranscript: (transcript: string, isFinal: boolean) => void;
   onError: (error: string) => void;
   onEnd: () => void;
   onAudioStart?: () => void;
-}): SpeechRecognitionController | null {
+  onAudioEnd?: () => void;
+  onSpeechStart?: () => void;
+  onSpeechEnd?: () => void;
+  continuous?: boolean;
+  autoRestart?: boolean;
+}
+
+export function createSpeechRecognition(
+  options: SpeechRecognitionOptions
+): SpeechRecognitionController | null {
   if (!isSpeechRecognitionSupported()) {
     options.onError(
       "O reconhecimento de voz nativo não é suportado por este navegador. Recomendamos Google Chrome, Microsoft Edge ou Safari atualizado."
@@ -436,13 +446,31 @@ export function createSpeechRecognition(options: {
   }
 
   recognition.lang = "pt-BR";
-  recognition.continuous = true;
+  recognition.continuous = options.continuous !== undefined ? options.continuous : true;
   recognition.interimResults = true;
   recognition.maxAlternatives = 1;
 
   if (options.onAudioStart) {
     recognition.onaudiostart = () => {
       options.onAudioStart?.();
+    };
+  }
+
+  if (options.onAudioEnd) {
+    recognition.onaudioend = () => {
+      options.onAudioEnd?.();
+    };
+  }
+
+  if (options.onSpeechStart) {
+    recognition.onspeechstart = () => {
+      options.onSpeechStart?.();
+    };
+  }
+
+  if (options.onSpeechEnd) {
+    recognition.onspeechend = () => {
+      options.onSpeechEnd?.();
     };
   }
 
@@ -509,8 +537,15 @@ export function createSpeechRecognition(options: {
   };
 
   recognition.onend = () => {
-    if (!isExplicitlyStopped) {
-      // Salva o que já foi reconhecido para a próxima sessão não perder conteúdo
+    if (isExplicitlyStopped) {
+      accumulatedSessionText = "";
+      lastSessionTranscript = "";
+      options.onEnd();
+      return;
+    }
+
+    // Se autoRestart estiver expressamente ativo
+    if (options.autoRestart) {
       if (lastSessionTranscript) {
         accumulatedSessionText = lastSessionTranscript;
       }
@@ -526,8 +561,7 @@ export function createSpeechRecognition(options: {
         }
       }, 150);
     } else {
-      accumulatedSessionText = "";
-      lastSessionTranscript = "";
+      // Para fluxo conversacional com envio automático, finaliza a sessão para o turno
       options.onEnd();
     }
   };
@@ -562,6 +596,7 @@ export function createSpeechRecognition(options: {
         recognition.abort();
       } catch {}
     },
+    isActive: () => !isExplicitlyStopped,
   };
 }
 
@@ -611,10 +646,13 @@ export function playTestChime(): void {
 // TEXT-TO-SPEECH (TTS) - SPEECH SYNTHESIS COM PLAY, PAUSE, RESUME, STOP
 // ==========================================================================
 
-function cleanTextForSpeech(text: string): string {
+export function cleanTextForSpeech(text: string): string {
   return text
     .replace(/```[\s\S]*?```/g, " Bloco de código omitido. ")
     .replace(/<[^>]+>/g, " ")
+    .replace(/\[MODO PENSAR[^\]]*\]/gi, " ")
+    .replace(/\[DOCUMENTO ANEXADO[^\]]*\]/gi, " ")
+    .replace(/⚡|⚠️|💡|🔍|🤖|✨|🚀/g, " ")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/\*\*([^*]+)\*\*/g, "$1")
     .replace(/\*([^*]+)\*/g, "$1")
@@ -623,7 +661,7 @@ function cleanTextForSpeech(text: string): string {
     .replace(/^#{1,6}\s+/gm, "")
     .replace(/^>\s+/gm, "")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/^[\*\-]\s+/gm, "")
+    .replace(/^[\*\-•]\s+/gm, "")
     .replace(/[\u{1F300}-\u{1F9FF}]/gu, "")
     .replace(/[\u{2600}-\u{26FF}]/gu, "")
     .replace(/[\u{2700}-\u{27BF}]/gu, "")

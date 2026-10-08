@@ -205,7 +205,22 @@ export function ChatInput({
       onAudioStart: () => {
         setMicState("listening");
       },
-      onTranscript: (transcript) => {
+      onSpeechStart: () => {
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      },
+      onSpeechEnd: () => {
+        // Detecção nativa do fim da fala: envia rapidamente em 550ms
+        if (latestTranscriptRef.current.trim() || value.trim()) {
+          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = setTimeout(() => {
+            const txt = (latestTranscriptRef.current || value).trim();
+            if (txt) {
+              finishAndSendSpokenMessage(txt);
+            }
+          }, 550);
+        }
+      },
+      onTranscript: (transcript, isFinal) => {
         latestTranscriptRef.current = transcript;
         setValue(transcript);
         if (textareaRef.current) {
@@ -216,13 +231,15 @@ export function ChatInput({
           )}px`;
         }
 
-        // Auto-envio após 2.6s de pausa natural
+        // Auto-envio responsivo: 950ms após frase finalizada ou 1350ms em fala contínua
         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        const delay = isFinal ? 950 : 1350;
         silenceTimerRef.current = setTimeout(() => {
-          if (latestTranscriptRef.current.trim()) {
-            finishAndSendSpokenMessage(latestTranscriptRef.current.trim());
+          const txt = (latestTranscriptRef.current || transcript).trim();
+          if (txt) {
+            finishAndSendSpokenMessage(txt);
           }
-        }, 2600);
+        }, delay);
       },
       onError: (err) => {
         console.warn("Erro no reconhecimento de voz:", err);
@@ -237,7 +254,14 @@ export function ChatInput({
         levelMeterRef.current?.stop();
         levelMeterRef.current = null;
         setAudioLevel(0);
-        setMicState((prev) => (prev === "listening" ? "ready" : prev));
+
+        // Se o serviço de voz encerrou e há fala capturada, envia imediatamente
+        const pendingText = (latestTranscriptRef.current || value).trim();
+        if (pendingText) {
+          finishAndSendSpokenMessage(pendingText);
+        } else {
+          setMicState((prev) => (prev === "listening" ? "ready" : prev));
+        }
       },
     });
 
@@ -386,10 +410,12 @@ export function ChatInput({
             />
             <div className="recording-text-container">
               <span className="recording-status-title">
-                {audioLevel > 0.08 ? "Captando áudio..." : "Ouvindo... pode falar"}
+                {audioLevel > 0.08
+                  ? "Captando sua voz..."
+                  : "Ouvindo... envio automático ao parar de falar"}
               </span>
               <span className="recording-preview-text">
-                {value.trim() ? `"${value}"` : "Fale sua mensagem..."}
+                {value.trim() ? `"${value}"` : "Pode falar normalmente..."}
               </span>
             </div>
           </div>
@@ -399,11 +425,11 @@ export function ChatInput({
               type="button"
               className="stop-voice-btn send-btn"
               onClick={() => finishAndSendSpokenMessage()}
-              aria-label="Concluir e enviar mensagem por voz"
-              title="Concluir e enviar mensagem"
+              aria-label="Enviar agora a mensagem por voz"
+              title="Envio automático ao pausar ou clique para enviar imediatamente"
             >
               <Check size={14} className="send-check-icon" />
-              <span>Concluir e Enviar</span>
+              <span>Enviar Agora</span>
             </button>
             <button
               type="button"

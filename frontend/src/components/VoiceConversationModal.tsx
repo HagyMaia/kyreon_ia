@@ -11,12 +11,13 @@ import {
   RefreshCw,
   AlertCircle,
   Headphones,
-  CheckCircle2,
+  PhoneOff,
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
 import { KyreonAvatar } from "./KyreonAvatar";
 import {
+  cleanTextForSpeech,
   createMicrophoneLevelMeter,
   createSpeechRecognition,
   isSpeechRecognitionSupported,
@@ -25,6 +26,7 @@ import {
   speakText,
   stopSpeaking,
   testKyreonVoice,
+  unlockSpeechAudio,
   type SpeechRecognitionController,
 } from "../services/voice";
 import type { Agent } from "../types";
@@ -37,7 +39,17 @@ interface VoiceConversationModalProps {
   userName?: string;
 }
 
-type VoiceState = "idle" | "listening" | "thinking" | "speaking" | "error";
+/**
+ * Estados do ciclo de voz contínuo:
+ * OUVINDO (listening) → PROCESSANDO (processing) → PENSANDO (thinking) → FALANDO (speaking) → OUVINDO (listening)
+ */
+export type VoiceState =
+  | "idle"
+  | "listening"
+  | "processing"
+  | "thinking"
+  | "speaking"
+  | "error";
 
 export function VoiceConversationModal({
   isOpen,
@@ -54,19 +66,21 @@ export function VoiceConversationModal({
   const [isTestingAudio, setIsTestingAudio] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
 
-  // Detecção inteligente de fone e microfone
+  // Diagnóstico de fone de ouvido e microfone
   const [hasHeadphoneConnected, setHasHeadphoneConnected] = useState(true);
   const [microphoneActive, setMicrophoneActive] = useState(false);
   const [showWindowsHelp, setShowWindowsHelp] = useState(false);
   const [quickText, setQuickText] = useState("");
 
+  // Refs de controle para ciclo conversacional e prevenção de concorrência / stale closures
   const recognitionRef = useRef<SpeechRecognitionController | null>(null);
   const levelMeterRef = useRef<{ stop: () => void } | null>(null);
   const silenceTimerRef = useRef<any>(null);
-  const isListeningActiveRef = useRef(false);
+  const echoGuardTimerRef = useRef<any>(null);
+  const isDispatchingRef = useRef(false);
+  const micLockedRef = useRef(false);
   const transcriptBufferRef = useRef("");
 
-  // Refs de sincronização para evitar bugs de stale closure em callbacks assíncronos
   const voiceStateRef = useRef<VoiceState>("idle");
   const microphoneActiveRef = useRef(false);
   const isOpenRef = useRef(isOpen);
@@ -81,7 +95,7 @@ export function VoiceConversationModal({
     setMicrophoneActive(active);
   }
 
-  // Inicializa quando o modal abre
+  // Inicializa a sessão contínua quando o modal abre
   useEffect(() => {
     isOpenRef.current = isOpen;
     if (!isOpen) {
@@ -94,11 +108,14 @@ export function VoiceConversationModal({
     setLastKyreonReply("");
     setQuickText("");
     transcriptBufferRef.current = "";
+    isDispatchingRef.current = false;
+    micLockedRef.current = false;
 
-    // Toca som de ativação suave do Kyreon para confirmar a saída de áudio nos fones
+    // Desbloqueia áudio no mobile/navegadores e toca chime de boas-vindas
+    unlockSpeechAudio();
     playTestChime();
 
-    // Inicia sessão de voz
+    // Inicia sessão de voz automática
     initVoiceSession();
 
     return () => {
@@ -106,17 +123,45 @@ export function VoiceConversationModal({
     };
   }, [isOpen]);
 
+  // Tecla de atalho para interromper Kyreon (Barra de Espaço ou Escape)
+  useEffect(() => {
+    if (!isOpen) return;
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (voiceStateRef.current === "speaking" && (e.code === "Space" || e.key === "Escape")) {
+        e.preventDefault();
+        handleInterruptSpeaking();
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isOpen]);
+
   function cleanup() {
-    isListeningActiveRef.current = false;
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    micLockedRef.current = true;
+    isDispatchingRef.current = false;
+
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    if (echoGuardTimerRef.current) {
+      clearTimeout(echoGuardTimerRef.current);
+      echoGuardTimerRef.current = null;
+    }
+
     levelMeterRef.current?.stop();
     levelMeterRef.current = null;
     setAudioLevel(0);
 
     try {
-      recognitionRef.current?.stop();
+      recognitionRef.current?.abort();
     } catch {}
     recognitionRef.current = null;
+
     stopSpeaking();
     updateVoiceState("idle");
   }
@@ -127,7 +172,10 @@ export function VoiceConversationModal({
 
     if (!isSpeechRecognitionSupported()) {
       updateMicrophoneActive(false);
-      updateVoiceState("idle");
+      updateVoiceState("error");
+      setErrorMessage(
+        "Reconhecimento de voz não suportado neste navegador. Recomendamos Google Chrome, Microsoft Edge ou Safari."
+      );
       return;
     }
 
@@ -139,7 +187,7 @@ export function VoiceConversationModal({
       updateMicrophoneActive(true);
       setMicPermissionDenied(false);
       setErrorMessage(null);
-      startListening();
+      startListeningTurn();
     } else {
       updateMicrophoneActive(false);
       updateVoiceState("idle");
@@ -148,44 +196,97 @@ export function VoiceConversationModal({
         setMicPermissionDenied(true);
         setErrorMessage(
           micCheck.error ||
-            "Permissão de microfone bloqueada pelo navegador. Clique no cadeado ao lado de localhost e permita o microfone."
+            "Permissão de microfone bloqueada pelo navegador. Permita o microfone nas configurações de segurança do navegador."
         );
       } else if (micCheck.errorType === "not_found") {
-        // O fone de ouvido está conectado para áudio, mas o Windows não detectou a entrada de microfone
         setMicPermissionDenied(false);
-        setErrorMessage(null); // Modo Ouvinte Ativo
+        setErrorMessage(null); // Modo Ouvinte
       } else {
         setErrorMessage(micCheck.error || "Microfone indisponível no momento.");
       }
     }
   }
 
-  function startListening() {
-    if (!isOpenRef.current) return;
+  /**
+   * 1. ESTADO: OUVINDO (listening)
+   * Microfone ativo com medidor de volume dinâmico e detecção de silêncio para auto-envio
+   */
+  function startListeningTurn() {
+    if (!isOpenRef.current || micLockedRef.current) return;
 
-    // Cancela qualquer fala anterior
+    // Cancela qualquer reprodução de TTS prévia
     stopSpeaking();
+
+    // Limpa timers anteriores
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    if (echoGuardTimerRef.current) {
+      clearTimeout(echoGuardTimerRef.current);
+      echoGuardTimerRef.current = null;
+    }
+
     setLiveTranscript("");
     transcriptBufferRef.current = "";
+    isDispatchingRef.current = false;
+    micLockedRef.current = false;
 
-    // Inicia medidor de volume para ondas sonoras interativas
+    // Inicia medidor de volume em tempo real (VU meter dinâmico)
     levelMeterRef.current?.stop();
     levelMeterRef.current = createMicrophoneLevelMeter((lvl) => {
-      setAudioLevel(lvl);
+      if (voiceStateRef.current === "listening") {
+        setAudioLevel(lvl);
+      }
     });
 
+    try {
+      recognitionRef.current?.abort();
+    } catch {}
+
     const controller = createSpeechRecognition({
-      onTranscript: (transcript) => {
+      continuous: true,
+      autoRestart: false, // Turn-based: controlado explicitamente pela máquina de estados
+      onAudioStart: () => {
+        if (!micLockedRef.current && isOpenRef.current) {
+          updateVoiceState("listening");
+        }
+      },
+      onSpeechStart: () => {
+        // Usuário começou a falar: cancela timer de silêncio
+        if (silenceTimerRef.current) {
+          clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = null;
+        }
+      },
+      onSpeechEnd: () => {
+        // VAD Nativo: o navegador detectou o fim da elocução do usuário!
+        const captured = transcriptBufferRef.current.trim();
+        if (captured && !isDispatchingRef.current && !micLockedRef.current) {
+          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = setTimeout(() => {
+            const finalTxt = transcriptBufferRef.current.trim();
+            if (finalTxt && !isDispatchingRef.current && !micLockedRef.current) {
+              dispatchUserTurn(finalTxt);
+            }
+          }, 500); // 500ms de confirmação pós-fala
+        }
+      },
+      onTranscript: (transcript, isFinal) => {
+        if (micLockedRef.current || isDispatchingRef.current) return;
+
         transcriptBufferRef.current = transcript;
         setLiveTranscript(transcript);
 
-        // Reinicia timer de silêncio para auto-envio após 2.4s de pausa
+        // Timer inteligente de silêncio: 950ms se frase finalizada, 1350ms em interim
         if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        const delay = isFinal ? 950 : 1350;
         silenceTimerRef.current = setTimeout(() => {
-          if (transcriptBufferRef.current.trim()) {
-            handleSendSpokenMessage(transcriptBufferRef.current.trim());
+          const finalTxt = transcriptBufferRef.current.trim();
+          if (finalTxt && !isDispatchingRef.current && !micLockedRef.current) {
+            dispatchUserTurn(finalTxt);
           }
-        }, 2400);
+        }, delay);
       },
       onError: (err) => {
         console.warn("[VoiceModal] Erro de voz:", err);
@@ -196,102 +297,201 @@ export function VoiceConversationModal({
         if (err.includes("bloqueada") || err.includes("negada")) {
           setMicPermissionDenied(true);
           updateMicrophoneActive(false);
-        }
-        if (err.includes("não encontrado") || err.includes("ocupado")) {
+          updateVoiceState("error");
+          setErrorMessage(err);
+        } else if (err.includes("não encontrado") || err.includes("ocupado")) {
           updateMicrophoneActive(false);
+          updateVoiceState("error");
+          setErrorMessage(err);
         }
-        setErrorMessage(err);
-        updateVoiceState("idle");
       },
       onEnd: () => {
-        // Se ainda estiver em modo de escuta contínua, reinicia
-        if (isListeningActiveRef.current && voiceStateRef.current === "listening") {
-          try {
-            recognitionRef.current?.start();
-          } catch {}
+        levelMeterRef.current?.stop();
+        levelMeterRef.current = null;
+        setAudioLevel(0);
+
+        // Se o reconhecimento encerrou e há fala coletada, envia imediatamente
+        const pending = transcriptBufferRef.current.trim();
+        if (pending && !isDispatchingRef.current && !micLockedRef.current) {
+          dispatchUserTurn(pending);
+        } else if (
+          isOpenRef.current &&
+          !micLockedRef.current &&
+          voiceStateRef.current === "listening"
+        ) {
+          // O usuário ficou em silêncio e o navegador deu timeout: reinicia escuta
+          setTimeout(() => {
+            if (
+              isOpenRef.current &&
+              !micLockedRef.current &&
+              voiceStateRef.current === "listening"
+            ) {
+              startListeningTurn();
+            }
+          }, 200);
         }
       },
     });
 
     if (controller) {
       recognitionRef.current = controller;
-      isListeningActiveRef.current = true;
       updateVoiceState("listening");
       controller.start();
     }
   }
 
-  async function handleSendSpokenMessage(textToSend: string) {
-    if (!textToSend.trim() || voiceStateRef.current === "thinking") return;
+  /**
+   * 2 & 3. ESTADOS: PROCESSANDO (processing) → PENSANDO (thinking)
+   * Interrompe o microfone imediatamente para evitar captura de eco,
+   * despacha o texto para a IA e aguarda a resposta analítica.
+   */
+  async function dispatchUserTurn(textToSend: string) {
+    if (isDispatchingRef.current || micLockedRef.current) return;
+    const cleanText = textToSend.trim();
+    if (!cleanText) return;
 
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    isListeningActiveRef.current = false;
+    isDispatchingRef.current = true;
+    micLockedRef.current = true; // TRAVA O MICROFONE para impedir captura de eco
+
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+
+    // Para o SpeechRecognition e o medidor de volume imediatamente
     levelMeterRef.current?.stop();
     levelMeterRef.current = null;
     setAudioLevel(0);
 
     try {
-      recognitionRef.current?.stop();
+      recognitionRef.current?.abort();
     } catch {}
+    recognitionRef.current = null;
 
-    updateVoiceState("thinking");
-    setLiveTranscript(textToSend);
+    // Transição de Estados
+    updateVoiceState("processing");
+    setLiveTranscript(cleanText);
+
+    setTimeout(() => {
+      if (isOpenRef.current && voiceStateRef.current === "processing") {
+        updateVoiceState("thinking");
+      }
+    }, 180);
 
     try {
-      const response = await onSendMessage(textToSend);
+      const response = await onSendMessage(cleanText);
+      if (!isOpenRef.current) return;
+
       const replyText =
-        typeof response === "string"
-          ? response
+        typeof response === "string" && response.trim()
+          ? response.trim()
           : "Resposta processada com sucesso pelo Kyreon.";
 
       setLastKyreonReply(replyText);
-      updateVoiceState("speaking");
 
-      // Fala a resposta do Kyreon no fone de ouvido do usuário
-      speakText(
-        replyText,
-        () => {
-          updateVoiceState("speaking");
-        },
-        () => {
-          // Quando terminar de falar, se tiver microfone ativo, volta a ouvir automaticamente
-          if (isOpenRef.current) {
-            if (microphoneActiveRef.current) {
-              updateVoiceState("listening");
-              startListening();
-            } else {
-              updateVoiceState("idle");
-            }
-          }
-        },
-        (err) => {
-          console.warn("[VoiceModal] Erro ao falar resposta:", err);
-          if (isOpenRef.current) {
-            updateVoiceState("idle");
-          }
-        }
-      );
+      // 4. ESTADO: FALANDO (speaking)
+      playKyreonVoiceResponse(replyText);
     } catch (err: any) {
+      console.error("[VoiceModal] Falha ao enviar fala para o agente:", err);
+      if (!isOpenRef.current) return;
       setErrorMessage(
-        err.message || "Erro ao processar mensagem com o agente Kyreon."
+        err.message || "Erro ao conectar com o agente de IA Kyreon."
       );
       updateVoiceState("error");
+      isDispatchingRef.current = false;
+      micLockedRef.current = false;
     }
   }
 
-  function handleManualSend() {
-    const text = (liveTranscript || transcriptBufferRef.current).trim();
-    if (text) {
-      handleSendSpokenMessage(text);
-    }
+  /**
+   * 4. ESTADO: FALANDO (speaking)
+   * Reproduz via TTS no fone. Microfone permanece rigorosamente DESLIGADO.
+   */
+  function playKyreonVoiceResponse(text: string) {
+    if (!isOpenRef.current) return;
+
+    updateVoiceState("speaking");
+    micLockedRef.current = true; // Garante que o microfone continue fechado durante o áudio
+
+    const textToSpeak = cleanTextForSpeech(text);
+
+    speakText(
+      textToSpeak,
+      () => {
+        if (isOpenRef.current) {
+          updateVoiceState("speaking");
+        }
+      },
+      () => {
+        // Kyreon terminou de falar: ciclo volta automaticamente para OUVINDO
+        handleKyreonSpeechComplete();
+      },
+      (err) => {
+        console.warn("[VoiceModal] TTS warning:", err);
+        handleKyreonSpeechComplete();
+      }
+    );
   }
 
+  /**
+   * 5. RETORNO AUTOMÁTICO: OUVINDO (listening)
+   * Após a fala do Kyreon terminar, aguarda um guard buffer acústico de 350ms
+   * e reabre o microfone automaticamente para o próximo turno do usuário.
+   */
+  function handleKyreonSpeechComplete() {
+    if (!isOpenRef.current) return;
+
+    stopSpeaking();
+
+    // Buffer de 350ms para garantir que o som físico dos alto-falantes/fones tenha sumido
+    if (echoGuardTimerRef.current) clearTimeout(echoGuardTimerRef.current);
+    echoGuardTimerRef.current = setTimeout(() => {
+      if (!isOpenRef.current) return;
+
+      micLockedRef.current = false;
+      isDispatchingRef.current = false;
+      setLiveTranscript("");
+      transcriptBufferRef.current = "";
+
+      if (microphoneActiveRef.current) {
+        startListeningTurn();
+      } else {
+        updateVoiceState("idle");
+      }
+    }, 350);
+  }
+
+  /**
+   * Interrompe o Kyreon enquanto ele está falando e reabre o microfone imediatamente
+   */
+  function handleInterruptSpeaking() {
+    stopSpeaking();
+    if (echoGuardTimerRef.current) clearTimeout(echoGuardTimerRef.current);
+
+    setTimeout(() => {
+      if (isOpenRef.current) {
+        micLockedRef.current = false;
+        isDispatchingRef.current = false;
+        setLiveTranscript("");
+        transcriptBufferRef.current = "";
+        startListeningTurn();
+      }
+    }, 200);
+  }
+
+  // Envio de texto manual opcional (fallback caso usuário prefira digitar)
   function handleQuickTextSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!quickText.trim() || voiceState === "thinking" || voiceState === "speaking") return;
+    if (
+      !quickText.trim() ||
+      voiceState === "thinking" ||
+      voiceState === "speaking" ||
+      voiceState === "processing"
+    )
+      return;
     const msg = quickText.trim();
     setQuickText("");
-    handleSendSpokenMessage(msg);
+    dispatchUserTurn(msg);
   }
 
   function handleTestAudio() {
@@ -311,14 +511,21 @@ export function VoiceConversationModal({
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
+        aria-label="Conversa Contínua por Voz"
       >
-        {/* Cabeçalho */}
+        {/* Cabeçalho com Pílula de Estado Dinâmica */}
         <div className="voice-modal-header">
           <div className="voice-status-pill">
             {voiceState === "listening" && (
               <>
                 <span className="pulse-dot green" />
                 <span>Ouvindo sua voz...</span>
+              </>
+            )}
+            {voiceState === "processing" && (
+              <>
+                <span className="pulse-dot amber" />
+                <span>Processando fala...</span>
               </>
             )}
             {voiceState === "thinking" && (
@@ -344,7 +551,7 @@ export function VoiceConversationModal({
                 {microphoneActive ? (
                   <>
                     <Mic size={13} className="text-cyan" />
-                    <span>Pronto para ouvir</span>
+                    <span>Pronto para conversar</span>
                   </>
                 ) : (
                   <>
@@ -360,13 +567,14 @@ export function VoiceConversationModal({
             type="button"
             className="btn-close-voice-modal"
             onClick={onClose}
-            title="Encerrar conversa por voz"
+            title="Encerrar conversa por voz (Esc)"
+            aria-label="Fechar modal de voz"
           >
             <X size={20} />
           </button>
         </div>
 
-        {/* Centro: Avatar e Visualizador Sonoro */}
+        {/* Centro: Avatar Interativo e Visualizador de Volume de Voz */}
         <div className="voice-visualizer-center">
           <div
             className={`voice-avatar-orb ${
@@ -374,15 +582,19 @@ export function VoiceConversationModal({
                 ? "speaking-glow"
                 : voiceState === "listening"
                 ? "listening-glow"
+                : voiceState === "processing"
+                ? "processing-glow"
                 : voiceState === "thinking"
                 ? "thinking-glow"
                 : ""
             }`}
             style={
-              voiceState === "listening" && audioLevel > 0.05
+              voiceState === "listening" && audioLevel > 0.04
                 ? {
-                    transform: `scale(${1 + Math.min(0.08, audioLevel * 0.15)})`,
-                    boxShadow: `0 0 ${40 + audioLevel * 30}px rgba(6, 182, 212, ${0.5 + audioLevel * 0.4})`,
+                    transform: `scale(${1 + Math.min(0.09, audioLevel * 0.16)})`,
+                    boxShadow: `0 0 ${40 + audioLevel * 35}px rgba(16, 185, 129, ${
+                      0.5 + audioLevel * 0.4
+                    })`,
                   }
                 : undefined
             }
@@ -390,14 +602,14 @@ export function VoiceConversationModal({
             <KyreonAvatar size="xl" glow showStatus />
           </div>
 
-          {/* Ondas Sonoras Dinâmicas com Reação ao Volume da Voz */}
-          <div className="voice-waveform-container">
+          {/* Ondas Sonoras Reativas à Voz e ao Áudio */}
+          <div className="voice-waveform-container" aria-hidden="true">
             {[0, 1, 2, 3, 4].map((i) => {
               const isActive =
                 voiceState === "speaking" ||
-                (voiceState === "listening" && audioLevel > 0.05);
+                (voiceState === "listening" && audioLevel > 0.04);
               const dynamicHeight =
-                voiceState === "listening" && audioLevel > 0.05
+                voiceState === "listening" && audioLevel > 0.04
                   ? Math.min(38, 10 + audioLevel * (28 + (i % 3) * 5))
                   : undefined;
 
@@ -417,19 +629,21 @@ export function VoiceConversationModal({
           <p className="voice-subtext">
             {voiceState === "listening"
               ? audioLevel > 0.08
-                ? "Captando sua fala... continue ou aguarde para enviar."
-                : "Pode falar normalmente em português. O Kyreon responderá em voz alta no seu fone."
+                ? "Captando sua voz... termine de falar para enviar automaticamente."
+                : "Pode falar normalmente em português. O envio é automático e o Kyreon responde por voz."
+              : voiceState === "processing"
+              ? "Fala identificada! Enviando para o Kyreon..."
               : voiceState === "thinking"
-              ? "Processando resposta analítica..."
+              ? "Processando resposta analítica com IA..."
               : voiceState === "speaking"
-              ? "Reproduzindo resposta por áudio no seu fone..."
+              ? "Reproduzindo resposta no seu fone. Pressione 'Interromper' para falar a qualquer momento."
               : microphoneActive
-              ? "Clique em 'Falar Agora' ou diga sua pergunta."
+              ? "Conversa contínua pronta. Fale qualquer pergunta."
               : "Seu fone está conectado para áudio. Você pode digitar e ouvir a resposta falada pelo Kyreon."}
           </p>
         </div>
 
-        {/* Card Informativo: Fone Conectado & Diagnóstico de Microfone */}
+        {/* Card Informativo se microfone não estiver disponível */}
         {!microphoneActive && (
           <div className="headphone-status-card">
             <div className="headphone-card-top">
@@ -467,18 +681,17 @@ export function VoiceConversationModal({
               </button>
             </div>
 
-            {/* Dicas passo a passo para o Windows */}
             {showWindowsHelp && (
               <div className="windows-help-drawer">
                 <ol>
                   <li>
-                    <strong>Verifique os plugues do PC:</strong> Se o fone possui um único conector P3 e o computador tem entradas separadas (verde para som, rosa para microfone), conecte na entrada rosa ou use um adaptador Y.
+                    <strong>Plugues do PC:</strong> Se o fone possui conector único P3 e o computador tem entradas separadas (verde/som e rosa/mic), conecte na entrada de microfone ou utilize adaptador.
                   </li>
                   <li>
-                    <strong>Painel de Som do Windows:</strong> Pressione <code>Win + R</code>, digite <code>mmsys.cpl</code> e dê Enter. Na aba <strong>Gravação</strong>, clique com o botão direito no seu <strong>Headset</strong> e selecione <strong>Habilitar</strong> e <strong>Definir como Padrão</strong>.
+                    <strong>Painel de Som:</strong> Pressione <code>Win + R</code>, digite <code>mmsys.cpl</code>. Na aba <strong>Gravação</strong>, selecione seu fone, clique em <strong>Habilitar</strong> e <strong>Definir como Padrão</strong>.
                   </li>
                   <li>
-                    <strong>Permissão do Navegador:</strong> Clique no cadeado ao lado de <code>localhost:5173</code> na barra de endereços e veja se o Microfone está em <strong>Permitir</strong>.
+                    <strong>Permissões:</strong> Clique no ícone de opções ao lado da barra de URL e permita o <strong>Microfone</strong>.
                   </li>
                 </ol>
                 <div className="drawer-actions">
@@ -496,10 +709,10 @@ export function VoiceConversationModal({
           </div>
         )}
 
-        {/* Caixa de Transcrição e Mensagens */}
-        <div className="voice-transcript-box">
+        {/* Caixa de Diálogo da Conversa */}
+        <div className="voice-transcript-box" role="region" aria-live="polite">
           {errorMessage && (
-            <div className="voice-error-alert">
+            <div className="voice-error-alert" role="alert">
               <AlertCircle size={15} />
               <span>{errorMessage}</span>
               {micPermissionDenied && (
@@ -515,6 +728,7 @@ export function VoiceConversationModal({
             </div>
           )}
 
+          {/* O que o usuário acabou de falar */}
           {liveTranscript && (
             <div className="transcript-user-bubble">
               <span className="speaker-tag">Você ({userName}):</span>
@@ -522,12 +736,13 @@ export function VoiceConversationModal({
             </div>
           )}
 
+          {/* A resposta que o Kyreon falou / está falando */}
           {lastKyreonReply && voiceState !== "listening" && (
             <div className="transcript-kyreon-bubble">
               <span className="speaker-tag kyreon-tag">Kyreon:</span>
               <p className="transcript-text">
-                {lastKyreonReply.length > 280
-                  ? lastKyreonReply.slice(0, 280) + "..."
+                {lastKyreonReply.length > 290
+                  ? lastKyreonReply.slice(0, 290) + "..."
                   : lastKyreonReply}
               </p>
             </div>
@@ -538,25 +753,29 @@ export function VoiceConversationModal({
               <Sparkles size={16} className="placeholder-icon" />
               <span>
                 {microphoneActive
-                  ? 'Diga: "Qual a previsão do tempo para Manaus hoje?"'
-                  : 'Digite sua mensagem abaixo ou clique em "Testar Áudio no Fone"'}
+                  ? 'Fale qualquer coisa como: "Qual a previsão de chuva para Manaus?"'
+                  : 'Digite sua pergunta abaixo para o Kyreon responder em áudio no fone'}
               </span>
             </div>
           )}
         </div>
 
-        {/* Campo de Envio Rápido para Modo Ouvinte / Fone de Ouvido */}
+        {/* Campo Opcional de Digitação para Modo Ouvinte / Fallback de Ruído */}
         <form onSubmit={handleQuickTextSubmit} className="voice-quick-input-form">
           <input
             type="text"
             placeholder={
               microphoneActive
-                ? "Ou digite sua pergunta aqui..."
-                : "Digite uma pergunta para o Kyreon responder em voz alta no fone..."
+                ? "Ou digite aqui se preferir..."
+                : "Digite uma pergunta para o Kyreon responder em áudio..."
             }
             value={quickText}
             onChange={(e) => setQuickText(e.target.value)}
-            disabled={voiceState === "thinking" || voiceState === "speaking"}
+            disabled={
+              voiceState === "thinking" ||
+              voiceState === "speaking" ||
+              voiceState === "processing"
+            }
           />
           <button
             type="submit"
@@ -564,86 +783,50 @@ export function VoiceConversationModal({
             disabled={
               !quickText.trim() ||
               voiceState === "thinking" ||
-              voiceState === "speaking"
+              voiceState === "speaking" ||
+              voiceState === "processing"
             }
-            title="Enviar para resposta em voz"
+            title="Enviar mensagem"
           >
             <Send size={15} />
           </button>
         </form>
 
-        {/* Controles no Rodapé */}
+        {/* Controles de Sessão no Rodapé */}
         <div className="voice-modal-footer">
           <button
             type="button"
             className="btn-footer-secondary"
             onClick={handleTestAudio}
-            title="Tocar som de teste no fone de ouvido"
+            title="Tocar som de teste no fone"
             disabled={isTestingAudio}
           >
             <Volume2 size={16} />
-            <span>{isTestingAudio ? "Testando no Fone..." : "Testar Áudio no Fone"}</span>
+            <span>{isTestingAudio ? "Testando Som..." : "Testar Áudio"}</span>
           </button>
 
-          {microphoneActive && (
-            <>
-              {voiceState === "listening" ? (
-                <button
-                  type="button"
-                  className="btn-footer-primary active-listening"
-                  onClick={handleManualSend}
-                  disabled={!((liveTranscript || transcriptBufferRef.current).trim())}
-                  title="Enviar o que foi falado para o Kyreon"
-                >
-                  <Send size={16} />
-                  <span>Enviar Fala</span>
-                </button>
-              ) : voiceState === "speaking" ? (
-                <button
-                  type="button"
-                  className="btn-footer-primary stop-speaking"
-                  onClick={() => {
-                    stopSpeaking();
-                    updateVoiceState("listening");
-                    startListening();
-                  }}
-                  title="Interromper fala e voltar a ouvir"
-                >
-                  <VolumeX size={16} />
-                  <span>Interromper</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="btn-footer-primary"
-                  onClick={startListening}
-                  title="Iniciar escuta de voz"
-                >
-                  <Mic size={16} />
-                  <span>Falar Agora</span>
-                </button>
-              )}
-            </>
-          )}
-
-          {!microphoneActive && (
+          {/* Botão de Interromper (ativo quando Kyreon está falando) */}
+          {voiceState === "speaking" && (
             <button
               type="button"
-              className="btn-footer-secondary"
-              onClick={initVoiceSession}
-              title="Tentar reconectar o microfone"
+              className="btn-footer-primary stop-speaking"
+              onClick={handleInterruptSpeaking}
+              title="Interromper fala do Kyreon e falar agora (Espaço)"
             >
-              <RefreshCw size={15} />
-              <span>Verificar Microfone</span>
+              <VolumeX size={16} />
+              <span>Interromper Fala</span>
             </button>
           )}
 
+          {/* Botão de Encerrar Sessão de Voz */}
           <button
             type="button"
             className="btn-footer-secondary btn-close-call"
             onClick={onClose}
+            title="Encerrar sessão de conversa por voz"
           >
-            <span>Encerrar Voz</span>
+            <PhoneOff size={15} />
+            <span>Encerrar Conversa de Voz</span>
           </button>
         </div>
       </div>
