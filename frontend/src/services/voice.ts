@@ -1,5 +1,7 @@
 // Voice Service: Speech Recognition (STT) & Speech Synthesis (TTS)
-// Otimizado com correções específicas para Chromium, Windows SAPI, e quebras de sentença contínuas.
+// Auditoria e Otimização para Desktop, Android (Chrome/Edge) e iOS (Safari/Chrome)
+
+export type TTSState = "idle" | "playing" | "paused" | "stopped";
 
 export function isSpeechRecognitionSupported(): boolean {
   return (
@@ -12,6 +14,10 @@ export function isSpeechRecognitionSupported(): boolean {
 
 export function isSpeechSynthesisSupported(): boolean {
   return typeof window !== "undefined" && "speechSynthesis" in window;
+}
+
+export function isSecureContextAvailable(): boolean {
+  return typeof window !== "undefined" && Boolean(window.isSecureContext);
 }
 
 // ==========================================================================
@@ -52,7 +58,7 @@ export interface MicrophoneAccessResult {
   granted: boolean;
   hasHeadphoneOutput?: boolean;
   error?: string;
-  errorType?: "not_allowed" | "not_found" | "unsupported" | "other";
+  errorType?: "not_allowed" | "not_found" | "unsupported" | "insecure" | "other";
   detectedInputs?: string[];
   detectedOutputs?: string[];
 }
@@ -78,13 +84,33 @@ export function getActiveMicrophoneStream(): MediaStream | null {
 export function releaseActiveMicrophoneStream(): void {
   if (activeMicrophoneStream) {
     try {
-      activeMicrophoneStream.getTracks().forEach((track) => track.stop());
+      activeMicrophoneStream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {}
+      });
     } catch {}
     activeMicrophoneStream = null;
   }
 }
 
-export async function requestMicrophoneAccess(preferredDeviceId?: string): Promise<MicrophoneAccessResult> {
+/**
+ * Solicita acesso ao microfone tratando restrições de HTTPS, permissão e liberação de tracks.
+ * Se retainStream for falso (padrão para STT), o stream é liberado imediatamente após verificar a permissão,
+ * evitando que o canal de áudio fique bloqueado para o SpeechRecognition nativo do navegador.
+ */
+export async function requestMicrophoneAccess(
+  preferredDeviceId?: string,
+  retainStream = false
+): Promise<MicrophoneAccessResult> {
+  if (typeof window !== "undefined" && !window.isSecureContext) {
+    return {
+      granted: false,
+      errorType: "insecure",
+      error: "O microfone requer conexão segura (HTTPS ou localhost). Acesso bloqueado por segurança.",
+    };
+  }
+
   if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
     return {
       granted: false,
@@ -93,8 +119,8 @@ export async function requestMicrophoneAccess(preferredDeviceId?: string): Promi
     };
   }
 
-  // Se já temos stream ativo e funcionando, reutiliza sem reiniciar conexão Bluetooth
-  if (activeMicrophoneStream && activeMicrophoneStream.active) {
+  // Se já temos stream ativo e funcionando e retainStream foi solicitado
+  if (retainStream && activeMicrophoneStream && activeMicrophoneStream.active) {
     return { granted: true };
   }
 
@@ -105,12 +131,22 @@ export async function requestMicrophoneAccess(preferredDeviceId?: string): Promi
       : { audio: true };
 
     const stream = await navigator.mediaDevices.getUserMedia(constraints);
-    activeMicrophoneStream = stream;
+    
+    if (retainStream) {
+      activeMicrophoneStream = stream;
+    } else {
+      // Libera as faixas imediatamente para não trancar o dispositivo exclusivo no Windows/Android
+      stream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {}
+      });
+      activeMicrophoneStream = null;
+    }
     return { granted: true };
   } catch (err: any) {
     console.warn("[Kyreon Voice] Tentativa direta de microfone falhou:", err);
 
-    // 2. Diagnóstico de dispositivos conectados
     let devices: MediaDeviceInfo[] = [];
     try {
       devices = await navigator.mediaDevices.enumerateDevices();
@@ -119,32 +155,18 @@ export async function requestMicrophoneAccess(preferredDeviceId?: string): Promi
     const audioInputs = devices.filter((d) => d.kind === "audioinput");
     const audioOutputs = devices.filter((d) => d.kind === "audiooutput");
 
-    // 3. Tenta qualquer entrada de áudio válida (ex: Headset Bluetooth)
-    for (const dev of audioInputs) {
-      if (dev.deviceId && dev.deviceId !== "default") {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: { deviceId: { exact: dev.deviceId } },
-          });
-          activeMicrophoneStream = stream;
-          return { granted: true };
-        } catch {}
-      }
-    }
-
-    const hasOutput = audioOutputs.length > 0 || devices.length > 0;
-
     if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
       return {
         granted: false,
-        hasHeadphoneOutput: hasOutput,
+        hasHeadphoneOutput: audioOutputs.length > 0,
         errorType: "not_allowed",
         error:
-          "Permissão de microfone bloqueada pelo navegador. Clique no ícone de cadeado na barra de endereços (ao lado de localhost:5173) e ative a permissão de Microfone.",
+          "Permissão de microfone bloqueada pelo navegador. Clique no ícone de configurações ao lado da URL e permita o acesso ao Microfone.",
       };
     }
 
     if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+      const hasOutput = audioOutputs.length > 0 || devices.length > 0;
       return {
         granted: false,
         hasHeadphoneOutput: hasOutput,
@@ -152,18 +174,40 @@ export async function requestMicrophoneAccess(preferredDeviceId?: string): Promi
         detectedInputs: audioInputs.map((d) => d.label || "Microfone"),
         detectedOutputs: audioOutputs.map((d) => d.label || "Fone / Alto-falante"),
         error: hasOutput
-          ? "Seu fone está conectado para saída de áudio (você ouve o Kyreon falar), mas a entrada de microfone Hands-Free precisa estar ativa no Windows."
-          : "Nenhum microfone detectado no computador.",
+          ? "Fone de ouvido detectado para reprodução, mas nenhuma entrada de gravação (microfone) foi encontrada."
+          : "Nenhum dispositivo de microfone foi encontrado.",
       };
     }
 
     return {
       granted: false,
-      hasHeadphoneOutput: hasOutput,
+      hasHeadphoneOutput: audioOutputs.length > 0,
       errorType: "other",
       error: `Não foi possível acessar o microfone: ${err.message || err.name}`,
     };
   }
+}
+
+export function listenToPermissionChanges(
+  onChange: (state: PermissionState) => void
+): (() => void) | null {
+  if (typeof navigator !== "undefined" && navigator.permissions?.query) {
+    let pStatus: PermissionStatus | null = null;
+    const listener = () => {
+      if (pStatus) onChange(pStatus.state);
+    };
+    navigator.permissions
+      .query({ name: "microphone" as PermissionName })
+      .then((status) => {
+        pStatus = status;
+        status.addEventListener("change", listener);
+      })
+      .catch(() => {});
+    return () => {
+      pStatus?.removeEventListener("change", listener);
+    };
+  }
+  return null;
 }
 
 // Medidor de volume em tempo real (VU Meter via Web Audio API)
@@ -200,7 +244,6 @@ export function createMicrophoneLevelMeter(
         sum += buffer[i];
       }
       const avg = sum / buffer.length;
-      // Normalização de 0.0 a 1.0
       const normalized = Math.min(1, avg / 110);
       onLevel(normalized);
       animId = requestAnimationFrame(tick);
@@ -239,7 +282,7 @@ export function createSpeechRecognition(options: {
 }): SpeechRecognitionController | null {
   if (!isSpeechRecognitionSupported()) {
     options.onError(
-      "O reconhecimento de voz nativo não é suportado pelo seu navegador atual. Recomendamos o Google Chrome ou Microsoft Edge."
+      "O reconhecimento de voz nativo não é suportado por este navegador. Recomendamos Google Chrome, Microsoft Edge ou Safari atualizado."
     );
     return null;
   }
@@ -253,7 +296,7 @@ export function createSpeechRecognition(options: {
 
   try {
     recognition = new SpeechRecognitionClass();
-  } catch (err) {
+  } catch {
     options.onError("Falha ao instanciar o serviço de voz do navegador.");
     return null;
   }
@@ -269,7 +312,6 @@ export function createSpeechRecognition(options: {
     };
   }
 
-  // Processamento determinístico de todos os resultados da sessão
   recognition.onresult = (event: any) => {
     let interimTranscript = "";
     let finalTranscript = "";
@@ -299,22 +341,24 @@ export function createSpeechRecognition(options: {
       case "not-allowed":
       case "service-not-allowed":
         options.onError(
-          "Permissão de microfone bloqueada. Clique no cadeado da barra de endereço e libere o microfone para este site."
+          "Permissão de microfone bloqueada. Permita o uso do microfone nas opções do navegador."
         );
         break;
       case "network":
         options.onError(
-          "Erro de conexão com o serviço de voz. Verifique sua conexão com a internet."
+          "Falha de rede com o serviço de transcrição. Verifique sua conexão com a internet."
         );
         break;
       case "no-speech":
-        // Pausa na fala do usuário. Mantém a escuta contínua ativa
-        console.log("[Kyreon Voice] Nenhuma fala captada no intervalo recente.");
+        // Silêncio temporário do usuário
         break;
       case "audio-capture":
         options.onError(
-          "Microfone não encontrado ou ocupado por outro programa. Verifique se o fone está conectado."
+          "Microfone ocupado ou indisponível. Verifique se outro aplicativo está usando o microfone."
         );
+        break;
+      case "aborted":
+        // Abortado intencionalmente
         break;
       default:
         console.log("[Kyreon Voice] Evento de áudio:", event.error);
@@ -323,15 +367,13 @@ export function createSpeechRecognition(options: {
   };
 
   recognition.onend = () => {
-    // Se não foi interrompido explicitamente pelo usuário, reinicia suavemente para manter escuta contínua
     if (!isExplicitlyStopped) {
       if (restartTimeout) clearTimeout(restartTimeout);
       restartTimeout = setTimeout(() => {
         if (!isExplicitlyStopped) {
           try {
             recognition.start();
-          } catch (err) {
-            console.warn("[Kyreon Voice] Auto-restart silencioso ignorado:", err);
+          } catch {
             options.onEnd();
           }
         }
@@ -348,7 +390,7 @@ export function createSpeechRecognition(options: {
       try {
         recognition.start();
       } catch (err: any) {
-        console.warn("[Kyreon Voice] Recognition already started or error:", err);
+        console.warn("[Kyreon Voice] Recognition start warning:", err);
       }
     },
     stop: () => {
@@ -380,11 +422,10 @@ export function playTestChime(): void {
 
     const ctx = new AudioContextClass();
     if (ctx.state === "suspended") {
-      ctx.resume();
+      ctx.resume().catch(() => {});
     }
 
     const now = ctx.currentTime;
-    // Nota 1 (E5 - 659Hz)
     const osc1 = ctx.createOscillator();
     const gain1 = ctx.createGain();
     osc1.type = "sine";
@@ -396,7 +437,6 @@ export function playTestChime(): void {
     osc1.start(now);
     osc1.stop(now + 0.35);
 
-    // Nota 2 (A5 - 880Hz)
     const osc2 = ctx.createOscillator();
     const gain2 = ctx.createGain();
     osc2.type = "sine";
@@ -408,23 +448,19 @@ export function playTestChime(): void {
     osc2.start(now + 0.12);
     osc2.stop(now + 0.6);
   } catch (err) {
-    console.warn("[Kyreon Voice] Falha ao tocar chime Web Audio:", err);
+    console.warn("[Kyreon Voice] Falha ao tocar chime:", err);
   }
 }
 
 // ==========================================================================
-// TEXT-TO-SPEECH (TTS) - SPEECH SYNTHESIS ROBUSTO
+// TEXT-TO-SPEECH (TTS) - SPEECH SYNTHESIS COM PLAY, PAUSE, RESUME, STOP
 // ==========================================================================
 
 function cleanTextForSpeech(text: string): string {
   return text
-    // Remove blocos de código
     .replace(/```[\s\S]*?```/g, " Bloco de código omitido. ")
-    // Remove tags HTML
     .replace(/<[^>]+>/g, " ")
-    // Remove código inline
     .replace(/`([^`]+)`/g, "$1")
-    // Remove formatações markdown
     .replace(/\*\*([^*]+)\*\*/g, "$1")
     .replace(/\*([^*]+)\*/g, "$1")
     .replace(/__([^_]+)__/g, "$1")
@@ -433,11 +469,9 @@ function cleanTextForSpeech(text: string): string {
     .replace(/^>\s+/gm, "")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
     .replace(/^[\*\-]\s+/gm, "")
-    // Remove emojis que causam leitura bizarra
     .replace(/[\u{1F300}-\u{1F9FF}]/gu, "")
     .replace(/[\u{2600}-\u{26FF}]/gu, "")
     .replace(/[\u{2700}-\u{27BF}]/gu, "")
-    // Normaliza espaços
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -446,7 +480,6 @@ function splitIntoSentenceChunks(text: string): string[] {
   const clean = cleanTextForSpeech(text);
   if (!clean) return [];
 
-  // Quebra por pontos, exclamações, interrogações ou novas linhas
   const rawParts = clean.match(/[^.!?;\n]+[.!?;\n]*/g) || [clean];
   const chunks: string[] = [];
 
@@ -454,7 +487,6 @@ function splitIntoSentenceChunks(text: string): string[] {
     const trimmed = part.trim();
     if (!trimmed) continue;
 
-    // Se o pedaço ainda for muito longo (> 170 caracteres), divide em vírgulas
     if (trimmed.length > 170) {
       const subParts = trimmed.match(/[^,:]+[,:]*/g) || [trimmed];
       for (const sub of subParts) {
@@ -499,7 +531,7 @@ export function getBestPortugueseVoice(): SpeechSynthesisVoice | null {
   );
   if (googlePt) return googlePt;
 
-  // 2. Microsoft Maria / Daniel / Francisca / Antonio / Natural (Edge / Windows 10/11)
+  // 2. Microsoft Maria / Daniel / Francisca / Antonio / Natural (Edge / Windows)
   const naturalPt = voices.find(
     (v) =>
       (v.lang === "pt-BR" || v.lang === "pt_BR") &&
@@ -521,7 +553,7 @@ export function getBestPortugueseVoice(): SpeechSynthesisVoice | null {
   );
   if (anyPtBr) return anyPtBr;
 
-  // 4. Qualquer voz portuguesa
+  // 4. Qualquer voz de língua portuguesa
   const anyPt = voices.find((v) => v.lang.toLowerCase().startsWith("pt"));
   if (anyPt) return anyPt;
 
@@ -529,8 +561,54 @@ export function getBestPortugueseVoice(): SpeechSynthesisVoice | null {
   return voices.find((v) => v.default) || voices[0] || null;
 }
 
+// Estados e Controle do TTS
+let currentTTSState: TTSState = "idle";
 let activePlaybackId = 0;
 let resumeInterval: any = null;
+let activeChunks: string[] = [];
+let currentChunkIndex = 0;
+let onCurrentEndCallback: (() => void) | null = null;
+let onCurrentStateCallback: ((state: TTSState) => void) | null = null;
+let onCurrentErrorCallback: ((err: any) => void) | null = null;
+
+function setTTSState(state: TTSState) {
+  currentTTSState = state;
+  onCurrentStateCallback?.(state);
+}
+
+export function getTTSState(): TTSState {
+  return currentTTSState;
+}
+
+export function isSpeaking(): boolean {
+  return currentTTSState === "playing";
+}
+
+export function isPaused(): boolean {
+  return currentTTSState === "paused";
+}
+
+/**
+ * Desbloqueia o motor de fala e Web Audio em navegadores móveis (iOS Safari / Android Chrome)
+ * Deve ser chamado a partir de um gesto do usuário (clique / toque).
+ */
+export function unlockSpeechAudio(): void {
+  if (typeof window === "undefined") return;
+  try {
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.resume();
+    }
+    const AudioContextClass =
+      window.AudioContext || (window as any).webkitAudioContext;
+    if (AudioContextClass) {
+      const dummyCtx = new AudioContextClass();
+      if (dummyCtx.state === "suspended") {
+        dummyCtx.resume().catch(() => {});
+      }
+      setTimeout(() => dummyCtx.close().catch(() => {}), 100);
+    }
+  } catch {}
+}
 
 export function stopSpeaking(): void {
   activePlaybackId++;
@@ -544,25 +622,49 @@ export function stopSpeaking(): void {
     } catch {}
   }
   (window as any).__kyreonActiveUtterance = null;
+  activeChunks = [];
+  currentChunkIndex = 0;
+  setTTSState("stopped");
+  setTimeout(() => {
+    if (currentTTSState === "stopped") {
+      setTTSState("idle");
+    }
+  }, 100);
 }
 
-export function isSpeaking(): boolean {
-  return isSpeechSynthesisSupported() && window.speechSynthesis.speaking;
+export function pauseSpeaking(): void {
+  if (!isSpeechSynthesisSupported()) return;
+  try {
+    window.speechSynthesis.pause();
+    setTTSState("paused");
+  } catch (err) {
+    console.warn("[Kyreon Voice] Falha ao pausar:", err);
+  }
+}
+
+export function resumeSpeaking(): void {
+  if (!isSpeechSynthesisSupported()) return;
+  try {
+    window.speechSynthesis.resume();
+    setTTSState("playing");
+  } catch (err) {
+    console.warn("[Kyreon Voice] Falha ao continuar áudio:", err);
+  }
 }
 
 export function speakText(
   text: string,
   onStart?: () => void,
   onEnd?: () => void,
-  onError?: (err: any) => void
+  onError?: (err: any) => void,
+  onStateChange?: (state: TTSState) => void
 ): void {
   if (!isSpeechSynthesisSupported()) {
-    console.warn("[Kyreon Voice] Speech synthesis não suportado.");
     onError?.("Síntese de voz não suportada neste navegador.");
     return;
   }
 
-  // Interrompe qualquer reprodução anterior
+  // Interrompe qualquer reprodução prévia para evitar duplicatas
   stopSpeaking();
 
   const chunks = splitIntoSentenceChunks(text);
@@ -571,18 +673,22 @@ export function speakText(
     return;
   }
 
+  activeChunks = chunks;
+  currentChunkIndex = 0;
+  onCurrentEndCallback = onEnd || null;
+  onCurrentErrorCallback = onError || null;
+  onCurrentStateCallback = onStateChange || null;
+
   const currentId = ++activePlaybackId;
-  let chunkIndex = 0;
   let hasStarted = false;
 
-  // Garante que o sintetizador não esteja travado em paused
   try {
     if (window.speechSynthesis.paused) {
       window.speechSynthesis.resume();
     }
   } catch {}
 
-  // Intervalo de "keep-alive" para contornar o bug do Chrome que congela após 15 segundos
+  // Keep-alive para contornar bug do Chromium de 15 segundos
   if (resumeInterval) clearInterval(resumeInterval);
   resumeInterval = setInterval(() => {
     if (activePlaybackId !== currentId) {
@@ -592,7 +698,8 @@ export function speakText(
     if (
       typeof window !== "undefined" &&
       window.speechSynthesis &&
-      window.speechSynthesis.speaking
+      window.speechSynthesis.speaking &&
+      !window.speechSynthesis.paused
     ) {
       window.speechSynthesis.resume();
     }
@@ -601,22 +708,23 @@ export function speakText(
   function speakNextChunk() {
     if (activePlaybackId !== currentId) return;
 
-    if (chunkIndex >= chunks.length) {
+    if (currentChunkIndex >= activeChunks.length) {
       if (resumeInterval) {
         clearInterval(resumeInterval);
         resumeInterval = null;
       }
       (window as any).__kyreonActiveUtterance = null;
-      onEnd?.();
+      setTTSState("idle");
+      onCurrentEndCallback?.();
       return;
     }
 
-    const chunkText = chunks[chunkIndex];
-    chunkIndex++;
+    const chunkText = activeChunks[currentChunkIndex];
+    currentChunkIndex++;
 
     const utterance = new SpeechSynthesisUtterance(chunkText);
     utterance.lang = "pt-BR";
-    utterance.rate = 1.05; // Ritmo agradável e natural
+    utterance.rate = 1.05;
     utterance.pitch = 1.0;
 
     const ptVoice = getBestPortugueseVoice();
@@ -624,20 +732,29 @@ export function speakText(
       utterance.voice = ptVoice;
     }
 
-    // Salva referência global no window para evitar o Garbage Collector do V8
     (window as any).__kyreonActiveUtterance = utterance;
 
     utterance.onstart = () => {
       if (activePlaybackId !== currentId) return;
       if (!hasStarted) {
         hasStarted = true;
+        setTTSState("playing");
         onStart?.();
       }
     };
 
+    utterance.onpause = () => {
+      if (activePlaybackId !== currentId) return;
+      setTTSState("paused");
+    };
+
+    utterance.onresume = () => {
+      if (activePlaybackId !== currentId) return;
+      setTTSState("playing");
+    };
+
     utterance.onend = () => {
       if (activePlaybackId !== currentId) return;
-      // Pequena pausa entre orações para soabilidade humana
       setTimeout(() => {
         speakNextChunk();
       }, 50);
@@ -649,7 +766,6 @@ export function speakText(
       if (e.error === "canceled" || e.error === "interrupted") {
         return;
       }
-      // Se der erro numa frase, tenta a próxima para não abortar todo o áudio
       setTimeout(() => {
         speakNextChunk();
       }, 50);
@@ -659,11 +775,12 @@ export function speakText(
       window.speechSynthesis.speak(utterance);
     } catch (err) {
       console.warn("[Kyreon Voice] Falha ao chamar speak():", err);
-      onError?.(err);
+      setTTSState("idle");
+      onCurrentErrorCallback?.(err);
     }
   }
 
-  // Delay de 60ms para aguardar o cancelamento assíncrono do Chrome ser processado
+  // Delay de 60ms para aguardar o cancelamento assíncrono anterior ser concluído
   setTimeout(() => {
     if (activePlaybackId === currentId) {
       speakNextChunk();
@@ -679,7 +796,7 @@ export function testKyreonVoice(
   playTestChime();
   setTimeout(() => {
     speakText(
-      "Olá Hagy! Seu fone de ouvido e o áudio do Kyreon estão conectados e funcionando perfeitamente.",
+      "Olá! Seu áudio e o Kyreon estão sincronizados e funcionando perfeitamente.",
       onStart,
       onEnd
     );

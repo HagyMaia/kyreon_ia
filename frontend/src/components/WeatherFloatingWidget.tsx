@@ -13,6 +13,7 @@ import {
   RefreshCw,
   SunMedium,
   Umbrella,
+  X,
 } from "lucide-react";
 
 interface WeatherData {
@@ -187,13 +188,26 @@ export function WeatherFloatingWidget() {
               <span className="date-badge">{currentDate} • Fuso UTC-4</span>
             </div>
 
-            <button
-              className={`refresh-btn ${refreshing ? "spinning" : ""}`}
-              onClick={fetchManausWeather}
-              title="Atualizar clima"
-            >
-              <RefreshCw size={13} />
-            </button>
+            <div className="card-top-actions">
+              <button
+                type="button"
+                className={`refresh-btn ${refreshing ? "spinning" : ""}`}
+                onClick={fetchManausWeather}
+                title="Atualizar clima"
+                aria-label="Atualizar dados de clima de Manaus"
+              >
+                <RefreshCw size={13} />
+              </button>
+              <button
+                type="button"
+                className="close-weather-card-btn"
+                onClick={() => setIsExpanded(false)}
+                title="Fechar painel"
+                aria-label="Fechar painel de clima"
+              >
+                <X size={15} />
+              </button>
+            </div>
           </div>
 
           <div className="live-clock-banner">

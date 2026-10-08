@@ -9,10 +9,19 @@ import {
   Sparkles,
   Volume2,
   VolumeX,
+  Play,
+  Pause,
+  Square,
 } from "lucide-react";
 import { KyreonAvatar } from "./KyreonAvatar";
-import { speakText, stopSpeaking } from "../services/voice";
-import type { Agent, Message, ToolCallInfo } from "../types";
+import {
+  speakText,
+  stopSpeaking,
+  pauseSpeaking,
+  resumeSpeaking,
+  unlockSpeechAudio,
+} from "../services/voice";
+import type { Agent, Message, ToolCallInfo, TTSState } from "../types";
 
 interface MessageListProps {
   messages: Message[];
@@ -125,6 +134,7 @@ export function MessageList({
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [speakingIndex, setSpeakingIndex] = useState<number | null>(null);
+  const [speakingState, setSpeakingState] = useState<TTSState>("idle");
   const lastSpokenMsgRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -142,27 +152,60 @@ export function MessageList({
       !lastMsg.content.startsWith("⚡")
     ) {
       lastSpokenMsgRef.current = lastMsg.content;
+      unlockSpeechAudio();
       speakText(
         lastMsg.content,
-        () => setSpeakingIndex(messages.length - 1),
-        () => setSpeakingIndex(null),
-        () => setSpeakingIndex(null)
+        () => {
+          setSpeakingIndex(messages.length - 1);
+          setSpeakingState("playing");
+        },
+        () => {
+          setSpeakingIndex(null);
+          setSpeakingState("idle");
+        },
+        () => {
+          setSpeakingIndex(null);
+          setSpeakingState("idle");
+        },
+        (state) => setSpeakingState(state)
       );
     }
   }, [messages, autoSpeak]);
 
-  function handleToggleSpeak(content: string, index: number) {
-    if (speakingIndex === index) {
-      stopSpeaking();
-      setSpeakingIndex(null);
-    } else {
-      speakText(
-        content,
-        () => setSpeakingIndex(index),
-        () => setSpeakingIndex(null),
-        () => setSpeakingIndex(null)
-      );
-    }
+  function handleStartSpeak(content: string, index: number) {
+    unlockSpeechAudio();
+    speakText(
+      content,
+      () => {
+        setSpeakingIndex(index);
+        setSpeakingState("playing");
+      },
+      () => {
+        setSpeakingIndex(null);
+        setSpeakingState("idle");
+      },
+      () => {
+        setSpeakingIndex(null);
+        setSpeakingState("idle");
+      },
+      (state) => setSpeakingState(state)
+    );
+  }
+
+  function handlePauseSpeak() {
+    pauseSpeaking();
+    setSpeakingState("paused");
+  }
+
+  function handleResumeSpeak() {
+    resumeSpeaking();
+    setSpeakingState("playing");
+  }
+
+  function handleStopSpeak() {
+    stopSpeaking();
+    setSpeakingIndex(null);
+    setSpeakingState("idle");
   }
 
   const isKyreon =
@@ -194,15 +237,18 @@ export function MessageList({
     <div className="messages">
       {messages.map((message, index) => {
         const isUser = message.role === "user";
+        const hasContent = Boolean(message.content && message.content.trim());
+        const isCurrentSpeaking = speakingIndex === index;
+
         return (
           <div key={message.id || index} className={`message-row ${message.role}`}>
             <div className="avatar-wrapper">
               {isUser ? (
-                <div className="avatar user-avatar">U</div>
+                <div className="avatar user-avatar" aria-label="Você">U</div>
               ) : isKyreon ? (
                 <KyreonAvatar size="sm" />
               ) : (
-                <div className="avatar">{activeAgent?.avatar || "✦"}</div>
+                <div className="avatar" aria-label={activeAgent?.name || "Agente"}>{activeAgent?.avatar || "✦"}</div>
               )}
             </div>
             <div className="message-container">
@@ -213,31 +259,67 @@ export function MessageList({
               )}
 
               <div className="message-content">
-                {message.content.split("\n").map((line, i) => (
-                  <p key={i}>{line || "\u00A0"}</p>
-                ))}
+                {hasContent ? (
+                  message.content.split("\n").map((line, i) => (
+                    <p key={i}>{line || "\u00A0"}</p>
+                  ))
+                ) : (
+                  <p className="empty-message-content">
+                    <em>(Nenhum conteúdo retornado)</em>
+                  </p>
+                )}
               </div>
 
-              {!isUser && !message.content.startsWith("⚡") && (
+              {!isUser && !message.content.startsWith("⚡") && hasContent && (
                 <div className="message-footer-actions">
-                  <button
-                    type="button"
-                    className={`btn-speak-message ${speakingIndex === index ? "active" : ""}`}
-                    title={speakingIndex === index ? "Interromper voz" : "Ouvir resposta (Voz)"}
-                    onClick={() => handleToggleSpeak(message.content, index)}
-                  >
-                    {speakingIndex === index ? (
-                      <>
-                        <VolumeX size={13} />
-                        <span>Parar áudio</span>
-                      </>
-                    ) : (
-                      <>
-                        <Volume2 size={13} />
-                        <span>Ouvir</span>
-                      </>
-                    )}
-                  </button>
+                  {isCurrentSpeaking ? (
+                    <div className="tts-controls-group" role="group" aria-label="Controles de reprodução de voz">
+                      {speakingState === "paused" ? (
+                        <button
+                          type="button"
+                          className="btn-speak-message active"
+                          aria-label="Continuar áudio da resposta"
+                          title="Continuar áudio"
+                          onClick={handleResumeSpeak}
+                        >
+                          <Play size={12} aria-hidden="true" />
+                          <span>Continuar</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn-speak-message active"
+                          aria-label="Pausar áudio da resposta"
+                          title="Pausar áudio"
+                          onClick={handlePauseSpeak}
+                        >
+                          <Pause size={12} aria-hidden="true" />
+                          <span>Pausar</span>
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn-speak-message danger"
+                        aria-label="Parar reprodução de voz"
+                        title="Parar áudio"
+                        onClick={handleStopSpeak}
+                      >
+                        <Square size={11} aria-hidden="true" />
+                        <span>Parar</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-speak-message"
+                      aria-label="Ouvir resposta com voz sintetizada"
+                      title="Ouvir resposta"
+                      onClick={() => handleStartSpeak(message.content, index)}
+                    >
+                      <Volume2 size={13} aria-hidden="true" />
+                      <span>Ouvir</span>
+                    </button>
+                  )}
                 </div>
               )}
             </div>

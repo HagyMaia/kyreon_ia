@@ -94,3 +94,26 @@ export interface FileUploadResponse {
   status: string;
   message: string;
 }
+
+export type ChatStatus =
+  | "idle"
+  | "sending"
+  | "processing"
+  | "responding"
+  | "success"
+  | "error"
+  | "offline"
+  | "reconnecting";
+
+export type TTSState = "idle" | "playing" | "paused" | "stopped";
+
+export type MicState =
+  | "disabled"
+  | "requesting_permission"
+  | "ready"
+  | "listening"
+  | "processing"
+  | "finished"
+  | "error";
+
+export type AgentUpdateInput = Partial<AgentCreateInput>;

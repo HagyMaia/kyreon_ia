@@ -41,6 +41,7 @@ async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/{agent_id}", response_model=AgentRead)
+@router.put("/{agent_id}", response_model=AgentRead)
 async def update_agent(
     agent_id: str,
     agent_in: AgentUpdate,

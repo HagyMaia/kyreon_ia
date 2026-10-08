@@ -8,7 +8,10 @@ import {
   Mic,
   MicOff,
   Plus,
+  Volume2,
+  VolumeX,
   X,
+  AlertTriangle,
 } from "lucide-react";
 import {
   ChangeEvent,
@@ -22,12 +25,14 @@ import { uploadFile } from "../services/api";
 import {
   createMicrophoneLevelMeter,
   createSpeechRecognition,
+  isSecureContextAvailable,
   isSpeechRecognitionSupported,
+  listenToPermissionChanges,
   requestMicrophoneAccess,
   stopSpeaking,
   type SpeechRecognitionController,
 } from "../services/voice";
-import type { FileUploadResponse } from "../types";
+import type { FileUploadResponse, MicState } from "../types";
 
 interface ChatInputProps {
   loading: boolean;
@@ -54,8 +59,15 @@ export function ChatInput({
   const [uploading, setUploading] = useState(false);
   const [attachedDoc, setAttachedDoc] = useState<FileUploadResponse | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [isListening, setIsListening] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
+
+  // Estados do microfone: desativado → solicitando permissão → pronto → ouvindo → processando → finalizado
+  const [micState, setMicState] = useState<MicState>(() => {
+    if (!isSpeechRecognitionSupported()) return "disabled";
+    if (!isSecureContextAvailable()) return "disabled";
+    return "ready";
+  });
+
   const [showVoiceTooltip, setShowVoiceTooltip] = useState(() => {
     return localStorage.getItem("kyreon_voice_tip_dismissed") !== "true";
   });
@@ -67,10 +79,22 @@ export function ChatInput({
   const silenceTimerRef = useRef<any>(null);
   const latestTranscriptRef = useRef<string>("");
 
-  const sttSupported = isSpeechRecognitionSupported();
+  const sttSupported = isSpeechRecognitionSupported() && isSecureContextAvailable();
 
   useEffect(() => {
+    // Monitora revogação ou alteração dinâmica de permissão de microfone
+    const unsub = listenToPermissionChanges((permState) => {
+      if (permState === "denied") {
+        setMicState("error");
+        setUploadError("Permissão de microfone foi revogada nas configurações do navegador.");
+      } else if (permState === "granted" && micState === "error") {
+        setMicState("ready");
+        setUploadError(null);
+      }
+    });
+
     return () => {
+      unsub?.();
       recognitionRef.current?.abort();
       levelMeterRef.current?.stop();
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
@@ -88,13 +112,21 @@ export function ChatInput({
     levelMeterRef.current = null;
     setAudioLevel(0);
 
+    setMicState("processing");
+
     try {
       recognitionRef.current?.stop();
     } catch {}
-    setIsListening(false);
 
-    const rawMessage = (textOverride !== undefined ? textOverride : latestTranscriptRef.current || value).trim();
+    const rawMessage = (
+      textOverride !== undefined ? textOverride : latestTranscriptRef.current || value
+    ).trim();
     latestTranscriptRef.current = "";
+
+    setMicState("finished");
+    setTimeout(() => {
+      setMicState("ready");
+    }, 1200);
 
     if (!rawMessage && !attachedDoc) return;
 
@@ -125,109 +157,111 @@ export function ChatInput({
     try {
       recognitionRef.current?.abort();
     } catch {}
-    setIsListening(false);
+    setMicState("ready");
     latestTranscriptRef.current = "";
   }
 
   async function toggleListening() {
-    if (isListening) {
+    if (micState === "listening") {
       finishAndSendSpokenMessage();
-    } else {
-      if (!sttSupported) {
+      return;
+    }
+
+    if (!sttSupported) {
+      if (!isSecureContextAvailable()) {
+        setUploadError("O acesso ao microfone requer conexão segura HTTPS ou execução em localhost.");
+      } else {
         setUploadError(
-          "O seu navegador não possui suporte ao reconhecimento de voz nativo. Recomendamos usar o Google Chrome ou Microsoft Edge."
+          "Reconhecimento de voz não suportado neste navegador. Recomendamos Google Chrome, Edge ou Safari atualizado."
         );
+      }
+      setMicState("disabled");
+      return;
+    }
+
+    dismissTooltip();
+    setUploadError(null);
+    latestTranscriptRef.current = "";
+
+    // 1. Estado: Solicitando Permissão
+    setMicState("requesting_permission");
+
+    // Solicita permissão prévia liberando as faixas imediatamente para não trancar canal exclusivo
+    const micCheck = await requestMicrophoneAccess(undefined, false);
+    if (!micCheck.granted) {
+      setMicState("error");
+      if (micCheck.errorType === "not_found" && onOpenVoiceModal) {
+        onOpenVoiceModal();
         return;
       }
+      setUploadError(
+        micCheck.error || "Microfone indisponível. Verifique as permissões do navegador."
+      );
+      return;
+    }
 
-      dismissTooltip();
-      setUploadError(null);
-      latestTranscriptRef.current = "";
-
-      // Solicita permissão prévia do microfone
-      const micCheck = await requestMicrophoneAccess();
-      if (!micCheck.granted) {
-        if (micCheck.errorType === "not_found" && onOpenVoiceModal) {
-          // Abre o Modo Voz que conta com o Modo Ouvinte e teste de som no fone
-          onOpenVoiceModal();
-          return;
+    // 2. Estado: Ativo & Ouvindo
+    const controller = createSpeechRecognition({
+      onAudioStart: () => {
+        setMicState("listening");
+      },
+      onTranscript: (transcript) => {
+        latestTranscriptRef.current = transcript;
+        setValue(transcript);
+        if (textareaRef.current) {
+          textareaRef.current.style.height = "auto";
+          textareaRef.current.style.height = `${Math.min(
+            textareaRef.current.scrollHeight,
+            140
+          )}px`;
         }
-        setUploadError(
-          micCheck.error ||
-            "Microfone não detectado. Seu fone de ouvido está ativo para ouvir o Kyreon."
-        );
-        return;
-      }
 
-      // Inicia medidor de volume para feedback visual em tempo real (VU meter)
-      levelMeterRef.current?.stop();
-      levelMeterRef.current = createMicrophoneLevelMeter((lvl) => {
-        setAudioLevel(lvl);
-      });
-
-      const controller = createSpeechRecognition({
-        onTranscript: (transcript) => {
-          latestTranscriptRef.current = transcript;
-          setValue(transcript);
-          if (textareaRef.current) {
-            textareaRef.current.style.height = "auto";
-            textareaRef.current.style.height = `${Math.min(
-              textareaRef.current.scrollHeight,
-              140
-            )}px`;
+        // Auto-envio após 2.6s de pausa natural
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = setTimeout(() => {
+          if (latestTranscriptRef.current.trim()) {
+            finishAndSendSpokenMessage(latestTranscriptRef.current.trim());
           }
+        }, 2600);
+      },
+      onError: (err) => {
+        console.warn("Erro no reconhecimento de voz:", err);
+        levelMeterRef.current?.stop();
+        levelMeterRef.current = null;
+        setAudioLevel(0);
+        setUploadError(err);
+        setMicState("error");
+        setTimeout(() => setMicState("ready"), 3000);
+      },
+      onEnd: () => {
+        levelMeterRef.current?.stop();
+        levelMeterRef.current = null;
+        setAudioLevel(0);
+        setMicState((prev) => (prev === "listening" ? "ready" : prev));
+      },
+    });
 
-          // Reinicia timer de silêncio para auto-envio suave após 2.6s sem falar
-          if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-          silenceTimerRef.current = setTimeout(() => {
-            if (latestTranscriptRef.current.trim()) {
-              finishAndSendSpokenMessage(latestTranscriptRef.current.trim());
-            }
-          }, 2600);
-        },
-        onError: (err) => {
-          console.warn("Erro no reconhecimento de voz:", err);
-          levelMeterRef.current?.stop();
-          levelMeterRef.current = null;
-          setAudioLevel(0);
-          setUploadError(err);
-          setIsListening(false);
-        },
-        onEnd: () => {
-          levelMeterRef.current?.stop();
-          levelMeterRef.current = null;
-          setAudioLevel(0);
-          setIsListening(false);
-        },
-      });
-
-      if (controller) {
-        recognitionRef.current = controller;
-        controller.start();
-        setIsListening(true);
-      }
+    if (controller) {
+      recognitionRef.current = controller;
+      controller.start();
+      setMicState("listening");
     }
   }
 
-  // Ativa o modo de conversa por voz (Abre Modal ou grava)
   function handleVoiceButtonClick() {
     dismissTooltip();
 
-    // Se houver texto digitado, funciona como botão Enviar
     if (value.trim() || attachedDoc) {
       submit();
       return;
     }
 
-    // Se estiver ouvindo pelo microfone do input, para a gravação
-    if (isListening) {
-      recognitionRef.current?.stop();
-      setIsListening(false);
+    if (micState === "listening") {
+      finishAndSendSpokenMessage();
       stopSpeaking();
       return;
     }
 
-    // Abre o Modo Conversa por Voz
     if (onOpenVoiceModal) {
       onOpenVoiceModal();
       return;
@@ -256,18 +290,18 @@ export function ChatInput({
   function submit(event?: FormEvent) {
     if (event) event.preventDefault();
 
-    if (isListening) {
+    if (micState === "listening") {
       recognitionRef.current?.stop();
-      setIsListening(false);
+      setMicState("ready");
     }
 
-    const rawMessage = value.trim();
-    if ((!rawMessage && !attachedDoc) || loading || uploading) return;
+    const textToSend = value.trim();
+    if (!textToSend && !attachedDoc) return;
 
-    let finalMessage = rawMessage;
+    let finalMessage = textToSend;
     if (attachedDoc) {
       const promptText =
-        rawMessage || "Por favor, analise as informações contidas neste documento.";
+        textToSend || "Por favor, analise as informações contidas neste documento.";
       finalMessage = `[DOCUMENTO ANEXADO: ${attachedDoc.filename} (${attachedDoc.character_count} caracteres)]\n\`\`\`\n${attachedDoc.content}\n\`\`\`\n\n${promptText}`;
     }
 
@@ -276,7 +310,6 @@ export function ChatInput({
     setAttachedDoc(null);
     setUploadError(null);
 
-    // Ajusta a altura da textarea após envio
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
@@ -291,7 +324,6 @@ export function ChatInput({
 
   function handleInput(e: ChangeEvent<HTMLTextAreaElement>) {
     setValue(e.target.value);
-    // Auto-ajuste de altura
     const target = e.target;
     target.style.height = "auto";
     target.style.height = `${Math.min(target.scrollHeight, 140)}px`;
@@ -301,18 +333,48 @@ export function ChatInput({
 
   return (
     <div className="composer-wrapper">
-      {/* Banner de Erro de Upload */}
+      {/* Banner de Erro de Upload / Permissão */}
       {uploadError && (
-        <div className="upload-error-banner">
-          <span>{uploadError}</span>
-          <button type="button" onClick={() => setUploadError(null)}>
+        <div className="upload-error-banner" role="alert">
+          <div className="alert-content">
+            <AlertTriangle size={14} className="alert-icon" />
+            <span>{uploadError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setUploadError(null)}
+            aria-label="Fechar alerta de erro"
+            title="Fechar"
+          >
             <X size={13} />
           </button>
         </div>
       )}
 
-      {/* Banner de Gravação de Voz Ativa com VU Meter e Envio Direto */}
-      {isListening && (
+      {/* Estados Visuais do Microfone */}
+      {micState === "requesting_permission" && (
+        <div className="voice-status-banner requesting">
+          <Loader2 size={15} className="spin-icon" />
+          <span>Solicitando permissão de microfone ao navegador...</span>
+        </div>
+      )}
+
+      {micState === "processing" && (
+        <div className="voice-status-banner processing">
+          <Loader2 size={15} className="spin-icon" />
+          <span>Processando e formatando fala...</span>
+        </div>
+      )}
+
+      {micState === "finished" && (
+        <div className="voice-status-banner finished">
+          <Check size={15} />
+          <span>Transcrição finalizada com sucesso!</span>
+        </div>
+      )}
+
+      {/* Banner de Gravação Ativa */}
+      {micState === "listening" && (
         <div className="voice-recording-banner">
           <div className="recording-status-group">
             <span
@@ -324,10 +386,10 @@ export function ChatInput({
             />
             <div className="recording-text-container">
               <span className="recording-status-title">
-                {audioLevel > 0.08 ? "Captando sua voz..." : "Ouvindo seu microfone/fone..."}
+                {audioLevel > 0.08 ? "Captando áudio..." : "Ouvindo... pode falar"}
               </span>
               <span className="recording-preview-text">
-                {value.trim() ? `"${value}"` : "Fale sua mensagem em português..."}
+                {value.trim() ? `"${value}"` : "Fale sua mensagem..."}
               </span>
             </div>
           </div>
@@ -337,7 +399,8 @@ export function ChatInput({
               type="button"
               className="stop-voice-btn send-btn"
               onClick={() => finishAndSendSpokenMessage()}
-              title="Concluir e enviar mensagem para o Kyreon"
+              aria-label="Concluir e enviar mensagem por voz"
+              title="Concluir e enviar mensagem"
             >
               <Check size={14} className="send-check-icon" />
               <span>Concluir e Enviar</span>
@@ -346,6 +409,7 @@ export function ChatInput({
               type="button"
               className="cancel-voice-btn"
               onClick={cancelListening}
+              aria-label="Cancelar gravação de voz"
               title="Cancelar gravação"
             >
               <X size={14} />
@@ -357,7 +421,7 @@ export function ChatInput({
       {/* Documento Anexado */}
       {attachedDoc && (
         <div className="attached-document-chip">
-          <FileText size={15} className="doc-icon" />
+          <FileText size={15} className="doc-icon" aria-hidden="true" />
           <div className="doc-meta">
             <span className="doc-name">{attachedDoc.filename}</span>
             <span className="doc-badge">
@@ -368,6 +432,7 @@ export function ChatInput({
             type="button"
             className="doc-remove-btn"
             title="Remover documento"
+            aria-label="Remover documento anexado"
             onClick={() => setAttachedDoc(null)}
           >
             <X size={14} />
@@ -375,7 +440,7 @@ export function ChatInput({
         </div>
       )}
 
-      {/* Barra de Chat Estilo ChatGPT (Pílula com Ações Internas) */}
+      {/* Barra de Chat (Pílula com Ações Internas) */}
       <form className="composer-chatgpt" onSubmit={submit}>
         <input
           ref={fileInputRef}
@@ -383,6 +448,7 @@ export function ChatInput({
           accept=".pdf,.txt,.csv,.json,.md,.markdown,.py,.js,.ts,.html,.css,.sql,.yaml,.yml"
           style={{ display: "none" }}
           onChange={handleFileChange}
+          aria-label="Upload de arquivo"
         />
 
         {/* Botão + (Anexar) */}
@@ -390,7 +456,8 @@ export function ChatInput({
           type="button"
           className={`btn-plus-attach ${uploading ? "loading" : ""}`}
           title="Anexar documento (PDF, TXT, CSV, Código)"
-          disabled={uploading || loading || isListening}
+          aria-label="Anexar documento ou código"
+          disabled={uploading || loading || micState === "listening"}
           onClick={() => fileInputRef.current?.click()}
         >
           {uploading ? (
@@ -408,7 +475,7 @@ export function ChatInput({
           onChange={handleInput}
           onKeyDown={handleKeyDown}
           placeholder={
-            isListening
+            micState === "listening"
               ? "Ouvindo... pode falar..."
               : attachedDoc
               ? "Instrua o que o agente deve analisar no documento..."
@@ -416,6 +483,7 @@ export function ChatInput({
           }
           disabled={loading || uploading}
           className="composer-textarea"
+          aria-label="Mensagem para o agente de IA"
         />
 
         {/* Grupo de Ações à Direita */}
@@ -427,8 +495,13 @@ export function ChatInput({
               className={`btn-think-mode ${thinkingMode ? "active" : ""}`}
               title={
                 thinkingMode
-                  ? "Modo Pensar ativado (Raciocínio profundo ativado)"
-                  : "Ativar Modo Pensar (Análise profunda passo a passo)"
+                  ? "Modo Pensar ativado"
+                  : "Ativar Modo Pensar (Raciocínio profundo)"
+              }
+              aria-label={
+                thinkingMode
+                  ? "Desativar modo de raciocínio profundo"
+                  : "Ativar modo de raciocínio profundo"
               }
               onClick={onToggleThinkingMode}
             >
@@ -437,36 +510,76 @@ export function ChatInput({
             </button>
           )}
 
-          {/* Botão Microfone (STT) */}
-          {sttSupported && (
+          {/* Botão Auto-Speak (Voz de leitura) */}
+          {onToggleAutoSpeak && (
             <button
               type="button"
-              className={`btn-mic-pill ${isListening ? "active-listening" : ""}`}
-              title={isListening ? "Parar de ouvir" : "Falar por voz"}
-              disabled={loading || uploading}
-              onClick={toggleListening}
+              className={`btn-autospeak-toggle ${autoSpeak ? "active" : ""}`}
+              title={
+                autoSpeak
+                  ? "Leitura por voz ativada"
+                  : "Ativar leitura por voz das respostas"
+              }
+              aria-label={
+                autoSpeak
+                  ? "Desativar leitura por voz das respostas"
+                  : "Ativar leitura por voz das respostas"
+              }
+              onClick={onToggleAutoSpeak}
             >
-              {isListening ? (
-                <MicOff size={18} className="mic-active-icon" />
-              ) : (
-                <Mic size={18} />
-              )}
+              {autoSpeak ? <Volume2 size={16} /> : <VolumeX size={16} />}
             </button>
           )}
 
-          {/* Botão de Voz / Enviar e Balão de Dica */}
+          {/* Botão Microfone (STT com estados visuais) */}
+          <button
+            type="button"
+            className={`btn-mic-pill ${
+              micState === "listening"
+                ? "active-listening"
+                : micState === "requesting_permission"
+                ? "requesting"
+                : micState === "disabled"
+                ? "disabled"
+                : ""
+            }`}
+            title={
+              micState === "listening"
+                ? "Parar de ouvir e enviar"
+                : micState === "disabled"
+                ? "Microfone indisponível ou requer HTTPS"
+                : "Falar por voz (Microfone)"
+            }
+            aria-label={
+              micState === "listening"
+                ? "Parar gravação de voz e enviar"
+                : "Gravar mensagem por voz"
+            }
+            disabled={loading || uploading || micState === "disabled"}
+            onClick={toggleListening}
+          >
+            {micState === "requesting_permission" ? (
+              <Loader2 size={18} className="spin-icon" />
+            ) : micState === "listening" ? (
+              <MicOff size={18} className="mic-active-icon" />
+            ) : (
+              <Mic size={18} />
+            )}
+          </button>
+
+          {/* Botão de Modo Voz / Enviar */}
           <div className="voice-button-wrapper">
-            {/* Balão Azul Idêntico à Referência */}
             {showVoiceTooltip && !hasContent && (
               <div className="voice-tooltip-balloon" role="tooltip">
                 <span className="tooltip-text">
-                  Converse em voz alta com o Kyreon usando o recurso Voz
+                  Converse em tempo real com o Kyreon usando o recurso Voz
                 </span>
                 <button
                   type="button"
                   className="tooltip-close-btn"
                   onClick={dismissTooltip}
                   title="Fechar dica"
+                  aria-label="Fechar dica de voz"
                 >
                   <X size={13} />
                 </button>
@@ -477,14 +590,19 @@ export function ChatInput({
             <button
               type={hasContent ? "submit" : "button"}
               className={`btn-voice-circle ${hasContent ? "send-mode" : "voice-mode"} ${
-                isListening || autoSpeak ? "active-pulse" : ""
+                micState === "listening" ? "active-pulse" : ""
               }`}
               title={
                 hasContent
                   ? "Enviar mensagem"
-                  : isListening
-                  ? "Parar modo de voz"
-                  : "Conversar por voz com o Kyreon"
+                  : micState === "listening"
+                  ? "Parar gravação"
+                  : "Modo Conversa por Voz com Kyreon"
+              }
+              aria-label={
+                hasContent
+                  ? "Enviar mensagem"
+                  : "Abrir modo de conversa por voz com o Kyreon"
               }
               disabled={loading || uploading}
               onClick={handleVoiceButtonClick}

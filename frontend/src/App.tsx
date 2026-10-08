@@ -11,6 +11,7 @@ import { WeatherFloatingWidget } from "./components/WeatherFloatingWidget";
 import { VoiceConversationModal } from "./components/VoiceConversationModal";
 import {
   createAgent,
+  updateAgent,
   deleteAgent,
   deleteConversation,
   fetchAgents,
@@ -25,6 +26,8 @@ import {
 import type {
   Agent,
   AgentCreateInput,
+  AgentUpdateInput,
+  ChatStatus,
   Conversation,
   Message,
   ModelInfo,
@@ -58,17 +61,50 @@ export default function App() {
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [health, setHealth] = useState<SystemHealth | null>(null);
 
-  // Estado do Chat
+  // Estado do Chat e Ciclo de Vida da IA
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversationId, setConversationId] = useState<string>();
   const [loading, setLoading] = useState(false);
+  const [chatStatus, setChatStatus] = useState<ChatStatus>("idle");
   const [autoSpeak, setAutoSpeak] = useState(false);
   const [thinkingMode, setThinkingMode] = useState(false);
 
   // Modais e Menu Mobile
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAgentModalOpen, setIsAgentModalOpen] = useState(false);
+  const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
+
+  // Monitoramento de Conectividade de Rede (Online / Offline / Reconexão)
+  useEffect(() => {
+    function handleOnline() {
+      setChatStatus("reconnecting");
+      fetchHealth()
+        .then((h) => {
+          setHealth(h);
+          setChatStatus("idle");
+        })
+        .catch(() => {
+          setChatStatus("idle");
+        });
+    }
+
+    function handleOffline() {
+      setChatStatus("offline");
+    }
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setChatStatus("offline");
+    }
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   // Carrega dados iniciais
   useEffect(() => {
@@ -147,11 +183,26 @@ export default function App() {
     }
   }
 
-  async function handleCreateAgent(data: AgentCreateInput) {
-    const created = await createAgent(data);
-    setAgents((prev) => [...prev, created]);
-    setActiveAgent(created);
-    handleNewChat();
+  async function handleSaveAgent(data: AgentCreateInput) {
+    try {
+      if (editingAgent) {
+        const updated = await updateAgent(editingAgent.id, data);
+        setAgents((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+        if (activeAgent?.id === updated.id) {
+          setActiveAgent(updated);
+        }
+        setEditingAgent(null);
+      } else {
+        const created = await createAgent(data);
+        setAgents((prev) => [...prev, created]);
+        setActiveAgent(created);
+        handleNewChat();
+      }
+    } catch (err: any) {
+      console.error("Erro ao salvar agente:", err);
+      alert(`Erro ao salvar agente: ${err.message || "Tente novamente"}`);
+      throw err;
+    }
   }
 
   async function handleDeleteAgent(agentId: string) {
@@ -174,6 +225,17 @@ export default function App() {
   }
 
   async function handleSend(content: string): Promise<string | void> {
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      setChatStatus("offline");
+      const offlineMsg =
+        "⚠️ Você está sem conexão com a internet. Verifique sua rede para conversar com o Kyreon.";
+      setMessages((current) => [
+        ...current,
+        { role: "assistant", content: offlineMsg },
+      ]);
+      return offlineMsg;
+    }
+
     const promptToSend =
       thinkingMode && !content.startsWith("[MODO PENSAR]")
         ? `[MODO PENSAR ATIVADO: Analise detalhadamente com raciocínio profundo passo a passo antes de responder]\n\n${content}`
@@ -184,11 +246,13 @@ export default function App() {
 
     setMessages((current) => [...current, userMessage]);
     setLoading(true);
+    setChatStatus("sending");
 
     const hasTools = activeAgent?.tools && activeAgent.tools.length > 0;
 
     // Se o agente possui ferramentas (ex: Kyreon Orquestrador), usa chamada com orquestração de tools e handoff
     if (hasTools) {
+      setChatStatus("processing");
       const assistantIndex = messages.length + 1;
       setMessages((current) => [
         ...current,
@@ -216,8 +280,12 @@ export default function App() {
           return updated;
         });
         reloadConversations();
+        setChatStatus("success");
+        setTimeout(() => setChatStatus("idle"), 2000);
         return result.content;
       } catch (err: any) {
+        console.error("[Kyreon Chat Error]:", err);
+        setChatStatus("error");
         const errorMsg = `⚠️ Falha ao processar solicitação: ${err.message || "Erro de conexão"}`;
         setMessages((current) => {
           const updated = [...current];
@@ -227,6 +295,7 @@ export default function App() {
           };
           return updated;
         });
+        setTimeout(() => setChatStatus("idle"), 4000);
         return errorMsg;
       } finally {
         setLoading(false);
@@ -236,6 +305,7 @@ export default function App() {
     // Para agentes sem ferramentas, streaming contínuo em tempo real
     const assistantIndex = messages.length + 1;
     let accumulatedContent = "";
+    setChatStatus("processing");
 
     try {
       // Tenta streaming SSE em tempo real
@@ -247,8 +317,10 @@ export default function App() {
         {
           onStart: (data) => {
             setConversationId(data.conversation_id);
+            setChatStatus("responding");
           },
           onToken: (token) => {
+            setChatStatus("responding");
             accumulatedContent += token;
             setMessages((current) => {
               const updated = [...current];
@@ -269,6 +341,8 @@ export default function App() {
           onDone: (data) => {
             setConversationId(data.conversation_id);
             reloadConversations();
+            setChatStatus("success");
+            setTimeout(() => setChatStatus("idle"), 2000);
           },
         }
       );
@@ -276,6 +350,7 @@ export default function App() {
     } catch (streamErr) {
       console.warn("Falha no streaming, tentando fallback síncrono:", streamErr);
       try {
+        setChatStatus("processing");
         const result = await sendMessage(
           promptToSend,
           history,
@@ -292,23 +367,52 @@ export default function App() {
           },
         ]);
         reloadConversations();
+        setChatStatus("success");
+        setTimeout(() => setChatStatus("idle"), 2000);
         return result.content;
-      } catch {
-        const fallbackErr =
+      } catch (fallbackErr: any) {
+        console.error("[Kyreon Fallback Error]:", fallbackErr);
+        setChatStatus("error");
+        const fallbackMsg =
           "⚠️ Não foi possível se conectar ao agente. Verifique se o backend está em execução.";
         setMessages((current) => [
           ...current,
           {
             role: "assistant",
-            content: fallbackErr,
+            content: fallbackMsg,
           },
         ]);
-        return fallbackErr;
+        setTimeout(() => setChatStatus("idle"), 4000);
+        return fallbackMsg;
       }
     } finally {
       setLoading(false);
     }
   }
+
+  function getStatusBadge(status: ChatStatus) {
+    switch (status) {
+      case "sending":
+        return { dotClass: "status-dot-sending", label: "Enviando..." };
+      case "processing":
+        return { dotClass: "status-dot-processing", label: "Kyreon pensando..." };
+      case "responding":
+        return { dotClass: "status-dot-responding", label: "Gerando resposta..." };
+      case "success":
+        return { dotClass: "status-dot-success", label: "Concluído" };
+      case "error":
+        return { dotClass: "status-dot-error", label: "Falha na resposta" };
+      case "offline":
+        return { dotClass: "status-dot-offline", label: "Offline" };
+      case "reconnecting":
+        return { dotClass: "status-dot-reconnecting", label: "Reconectando..." };
+      case "idle":
+      default:
+        return { dotClass: "status-dot-active", label: "Agente online" };
+    }
+  }
+
+  const statusBadge = getStatusBadge(chatStatus);
 
   return (
     <div className="app">
@@ -347,8 +451,8 @@ export default function App() {
             >
               <Menu size={20} />
             </button>
-            <span className="status-dot-active" />
-            <span className="status-label">Agente online</span>
+            <span className={`status-dot ${statusBadge.dotClass}`} />
+            <span className="status-label">{statusBadge.label}</span>
           </div>
 
           <div className="topbar-right">
@@ -359,6 +463,7 @@ export default function App() {
             <div className="agent-selector-wrapper">
               <select
                 className="agent-select"
+                aria-label="Selecionar agente ativo"
                 value={activeAgent?.id || ""}
                 onChange={(e) => {
                   const sel = agents.find((a) => a.id === e.target.value);
@@ -375,14 +480,30 @@ export default function App() {
 
             <button
               className="btn-create-agent-header"
-              onClick={() => setIsAgentModalOpen(true)}
+              onClick={() => {
+                setEditingAgent(null);
+                setIsAgentModalOpen(true);
+              }}
               title="Criar novo agente"
+              aria-label="Criar novo agente"
             >
               <Plus size={15} />
               <span className="btn-create-label">Novo Agente</span>
             </button>
           </div>
         </header>
+
+        {/* Banner de Status de Rede Offline / Reconectando */}
+        {chatStatus === "offline" && (
+          <div className="network-status-banner offline" role="alert">
+            <span>⚠️ Sem conexão com a internet. As respostas da IA requerem conexão de rede.</span>
+          </div>
+        )}
+        {chatStatus === "reconnecting" && (
+          <div className="network-status-banner reconnecting" role="status">
+            <span>🔄 Conexão restabelecida. Reconectando aos serviços do Kyreon...</span>
+          </div>
+        )}
 
         {/* Conteúdo Dinâmico por View */}
         {activeView === "chat" && (
@@ -395,8 +516,13 @@ export default function App() {
             />
 
             {loading && !messages.some((m) => m.role === "assistant" && m.content) && (
-              <div className="typing">
-                <span /> <span /> <span /> pensando...
+              <div className="typing" role="status" aria-live="polite">
+                <span /> <span /> <span />
+                {chatStatus === "processing"
+                  ? "Kyreon está pensando..."
+                  : chatStatus === "responding"
+                  ? "Gerando resposta..."
+                  : "Processando..."}
               </div>
             )}
 
@@ -405,7 +531,9 @@ export default function App() {
                 loading={loading}
                 onSend={handleSend}
                 placeholder={
-                  activeAgent
+                  chatStatus === "offline"
+                    ? "Offline - conecte-se à internet..."
+                    : activeAgent
                     ? `Pergunte ao ${activeAgent.name}...`
                     : "Pergunte qualquer coisa"
                 }
@@ -427,7 +555,14 @@ export default function App() {
             <AgentsView
               agents={agents}
               onSelectAgent={handleSelectAgentFromView}
-              onOpenCreateModal={() => setIsAgentModalOpen(true)}
+              onOpenCreateModal={() => {
+                setEditingAgent(null);
+                setIsAgentModalOpen(true);
+              }}
+              onEditAgent={(agent) => {
+                setEditingAgent(agent);
+                setIsAgentModalOpen(true);
+              }}
               onDeleteAgent={handleDeleteAgent}
             />
           </section>
@@ -440,11 +575,15 @@ export default function App() {
         )}
       </main>
 
-      {/* Modal de Criação de Agente */}
+      {/* Modal de Criação / Edição de Agente */}
       <AgentModal
         isOpen={isAgentModalOpen}
-        onClose={() => setIsAgentModalOpen(false)}
-        onSave={handleCreateAgent}
+        onClose={() => {
+          setIsAgentModalOpen(false);
+          setEditingAgent(null);
+        }}
+        onSave={handleSaveAgent}
+        initialAgent={editingAgent}
         availableModels={models}
         availableTools={tools}
       />

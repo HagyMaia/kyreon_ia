@@ -1,11 +1,12 @@
-import { useState } from "react";
-import { X, Sparkles, Bot, Wrench } from "lucide-react";
-import type { AgentCreateInput, ModelInfo, ToolInfo } from "../types";
+import { useEffect, useState } from "react";
+import { X, Sparkles, Bot, Wrench, Edit3 } from "lucide-react";
+import type { Agent, AgentCreateInput, ModelInfo, ToolInfo } from "../types";
 
 interface AgentModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (agent: AgentCreateInput) => Promise<void>;
+  onSave: (agent: AgentCreateInput, agentId?: string) => Promise<void>;
+  initialAgent?: Agent | null;
   availableModels: ModelInfo[];
   availableTools: ToolInfo[];
 }
@@ -16,6 +17,7 @@ export function AgentModal({
   isOpen,
   onClose,
   onSave,
+  initialAgent,
   availableModels,
   availableTools,
 }: AgentModalProps) {
@@ -29,6 +31,31 @@ export function AgentModal({
   const [avatar, setAvatar] = useState("✦");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  const isEditing = Boolean(initialAgent);
+
+  useEffect(() => {
+    if (initialAgent) {
+      setName(initialAgent.name || "");
+      setRole(initialAgent.role || "");
+      setDescription(initialAgent.description || "");
+      setSystemPrompt(initialAgent.system_prompt || "");
+      setModel(initialAgent.model || "gemini-3.5-flash-lite");
+      setTemperature(initialAgent.temperature ?? 0.7);
+      setSelectedTools(initialAgent.tools || []);
+      setAvatar(initialAgent.avatar || "✦");
+    } else {
+      setName("");
+      setRole("");
+      setDescription("");
+      setSystemPrompt("");
+      setModel("gemini-3.5-flash-lite");
+      setTemperature(0.7);
+      setSelectedTools(["get_current_datetime", "calculator"]);
+      setAvatar("✦");
+    }
+    setError("");
+  }, [isOpen, initialAgent]);
 
   if (!isOpen) return null;
 
@@ -53,40 +80,55 @@ export function AgentModal({
     setLoading(true);
     setError("");
     try {
-      await onSave({
-        name: name.trim(),
-        role: role.trim() || "Assistente Virtual",
-        description: description.trim(),
-        system_prompt: systemPrompt.trim(),
-        provider,
-        model,
-        temperature,
-        tools: selectedTools,
-        avatar,
-      });
+      await onSave(
+        {
+          name: name.trim(),
+          role: role.trim() || "Assistente Virtual",
+          description: description.trim(),
+          system_prompt: systemPrompt.trim(),
+          provider,
+          model,
+          temperature,
+          tools: selectedTools,
+          avatar,
+        },
+        initialAgent?.id
+      );
       onClose();
     } catch (err: any) {
-      setError(err.message || "Erro ao criar agente.");
+      setError(err.message || (isEditing ? "Erro ao atualizar agente." : "Erro ao criar agente."));
     } finally {
       setLoading(false);
     }
   }
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal-dialog">
+    <div className="modal-backdrop" onClick={onClose}>
+      <div
+        className="modal-dialog"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-agent-title"
+      >
         <div className="modal-header">
-          <div className="modal-title">
-            <Bot size={20} />
-            <h2>Criar Novo Agente</h2>
+          <div className="modal-title" id="modal-agent-title">
+            {isEditing ? <Edit3 size={20} /> : <Bot size={20} />}
+            <h2>{isEditing ? `Editar Agente: ${initialAgent?.name}` : "Criar Novo Agente"}</h2>
           </div>
-          <button className="icon-button" onClick={onClose} type="button">
+          <button
+            className="icon-button"
+            onClick={onClose}
+            type="button"
+            aria-label="Fechar janela"
+            title="Fechar"
+          >
             <X size={18} />
           </button>
         </div>
 
         <form onSubmit={handleSubmit} className="modal-form">
-          {error && <div className="alert-error">{error}</div>}
+          {error && <div className="alert-error" role="alert">{error}</div>}
 
           <div className="form-group avatar-picker">
             <label>Ícone do Agente</label>
@@ -97,6 +139,7 @@ export function AgentModal({
                   type="button"
                   className={`avatar-option ${avatar === icon ? "active" : ""}`}
                   onClick={() => setAvatar(icon)}
+                  aria-label={`Selecionar ícone ${icon}`}
                 >
                   {icon}
                 </button>
@@ -142,20 +185,28 @@ export function AgentModal({
               rows={4}
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
-              placeholder="Defina a personalidade, regras de negócio e como o agente deve responder..."
+              placeholder="Defina o papel, tom, diretrizes e objetivos do agente..."
               required
             />
           </div>
 
           <div className="form-row">
             <div className="form-group flex-1">
-              <label>Modelo LLM</label>
+              <label>Modelo de Linguagem (LLM)</label>
               <select value={model} onChange={(e) => setModel(e.target.value)}>
-                {availableModels.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name} ({m.provider})
-                  </option>
-                ))}
+                {availableModels.length > 0 ? (
+                  availableModels.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name} ({m.provider})
+                    </option>
+                  ))
+                ) : (
+                  <>
+                    <option value="gemini-3.5-flash-lite">Gemini 3.5 Flash Lite</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                    <option value="gpt-4o-mini">GPT-4o Mini (OpenAI)</option>
+                  </>
+                )}
               </select>
             </div>
             <div className="form-group flex-1">
@@ -198,7 +249,13 @@ export function AgentModal({
             </button>
             <button type="submit" className="btn-primary" disabled={loading}>
               <Sparkles size={16} />
-              {loading ? "Criando..." : "Salvar Agente"}
+              {loading
+                ? isEditing
+                  ? "Salvando..."
+                  : "Criando..."
+                : isEditing
+                ? "Salvar Alterações"
+                : "Criar Agente"}
             </button>
           </div>
         </form>
