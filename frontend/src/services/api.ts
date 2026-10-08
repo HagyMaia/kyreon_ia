@@ -23,7 +23,18 @@ export function getApiBaseUrl(): string {
     const custom = localStorage.getItem("kyreon_api_url");
     if (custom) return custom.trim().replace(/\/+$/, "");
   }
-  return (import.meta.env.VITE_API_URL ?? "http://localhost:8000/api").replace(/\/+$/, "");
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL.trim().replace(/\/+$/, "");
+  }
+  // Se o frontend estiver rodando fora de localhost (ex: Vercel / celular), usa o backend do Render
+  if (
+    typeof window !== "undefined" &&
+    window.location.hostname !== "localhost" &&
+    window.location.hostname !== "127.0.0.1"
+  ) {
+    return "https://kyreon-ia.onrender.com/api";
+  }
+  return "http://localhost:8000/api";
 }
 
 export function setApiBaseUrl(url: string): void {

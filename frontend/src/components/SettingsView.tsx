@@ -33,7 +33,8 @@ export function SettingsView({ health, models, onRefreshHealth }: SettingsViewPr
   };
 
   const handleResetApiUrl = () => {
-    const defaultUrl = (import.meta.env.VITE_API_URL ?? "http://localhost:8000/api").replace(/\/+$/, "");
+    localStorage.removeItem("kyreon_api_url");
+    const defaultUrl = getApiBaseUrl();
     setApiUrlState(defaultUrl);
     setApiBaseUrl(defaultUrl);
     setSavedNotice(true);
@@ -80,7 +81,7 @@ export function SettingsView({ health, models, onRefreshHealth }: SettingsViewPr
               type="text"
               value={apiUrl}
               onChange={(e) => setApiUrlState(e.target.value)}
-              placeholder="http://localhost:8000/api"
+              placeholder="https://kyreon-ia.onrender.com/api"
               className="api-url-input"
               aria-label="URL da API Backend"
             />
